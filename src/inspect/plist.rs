@@ -1,0 +1,404 @@
+//! Property-list inspector: XML plists and binary plists (`bplist00`).
+//!
+//! Defines: `inspect`, which maps a match offset to a key path such as
+//! `$.Account.Servers[1]`.
+//! Used by: `inspect::inspect` (dispatch).
+//! Uses: `quick_xml` (XML plists), `serde_json`, `crate::models::Inspection`.
+//!
+//! Two on-disk encodings share one logical model (nested dicts/arrays), so both
+//! resolve to the same dictionary-key / array-index path:
+//!  - XML plists: walked as XML, tracking `<key>` names and array positions.
+//!  - Binary plists: parsed via the trailer + offset table; the object whose
+//!    byte span contains the offset is located, then a path to it is found by
+//!    walking the object graph from the root.
+
+use quick_xml::Reader;
+use quick_xml::events::Event;
+use serde_json::json;
+
+use crate::models::Inspection;
+
+/// Dispatch to the binary or XML plist parser by signature.
+pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
+    if content.starts_with(b"bplist00") {
+        inspect_binary(content, offset)
+    } else {
+        inspect_xml(content, offset)
+    }
+}
+
+/// Render a path of segments (`key` or `[i]`) as `$`-rooted text.
+fn render(path: &[String]) -> String {
+    let mut s = String::from("$");
+    for seg in path {
+        if seg.starts_with('[') {
+            s.push_str(seg);
+        } else {
+            s.push('.');
+            s.push_str(seg);
+        }
+    }
+    s
+}
+
+// --- XML plist ---------------------------------------------------------------
+
+/// A container frame while walking an XML plist.
+struct Frame {
+    is_dict: bool,
+    array_index: usize,
+    pending_key: Option<String>,
+    path_pushed: bool,
+}
+
+/// Walk an XML plist, resolving the offset to a dict/array key path.
+fn inspect_xml(content: &[u8], offset: usize) -> Option<Inspection> {
+    let mut reader = Reader::from_reader(content);
+    reader.config_mut().check_end_names = false;
+
+    let mut buf = Vec::new();
+    let mut stack: Vec<Frame> = Vec::new();
+    let mut path: Vec<String> = Vec::new();
+    let mut in_key = false;
+    let mut key_buf = String::new();
+    let mut value_seg: Option<String> = None;
+    let mut last = 0usize;
+    let mut hit: Option<String> = None;
+
+    while let Ok(event) = reader.read_event_into(&mut buf) {
+        let pos = reader.buffer_position() as usize;
+        let covers = offset >= last && offset < pos;
+
+        match event {
+            Event::Eof => break,
+            Event::Start(e) => {
+                let name = e.name().as_ref().to_vec();
+                match name.as_slice() {
+                    b"plist" => {}
+                    b"key" => {
+                        in_key = true;
+                        key_buf.clear();
+                    }
+                    b"dict" | b"array" => {
+                        let seg = take_segment(&mut stack);
+                        let pushed = seg.is_some();
+                        if let Some(seg) = seg {
+                            path.push(seg);
+                        }
+                        stack.push(Frame {
+                            is_dict: name == b"dict",
+                            array_index: 0,
+                            pending_key: None,
+                            path_pushed: pushed,
+                        });
+                    }
+                    _ => {
+                        // A scalar value element (string, integer, ...).
+                        value_seg = Some(take_segment(&mut stack).unwrap_or_default());
+                    }
+                }
+            }
+            Event::Text(t) if covers => {
+                if in_key {
+                    let mut p = path.clone();
+                    p.push(String::from_utf8_lossy(t.as_ref()).into_owned());
+                    hit = Some(render(&p));
+                } else if let Some(seg) = &value_seg {
+                    let mut p = path.clone();
+                    p.push(seg.clone());
+                    hit = Some(render(&p));
+                }
+            }
+            Event::End(e) => {
+                let name = e.name().as_ref().to_vec();
+                match name.as_slice() {
+                    b"key" => {
+                        in_key = false;
+                        if let Some(frame) = stack.last_mut() {
+                            frame.pending_key = Some(key_buf.clone());
+                        }
+                    }
+                    b"dict" | b"array" => {
+                        if let Some(frame) = stack.pop()
+                            && frame.path_pushed
+                        {
+                            path.pop();
+                        }
+                    }
+                    b"plist" => {}
+                    _ => value_seg = None,
+                }
+            }
+            Event::Text(t) if in_key => {
+                key_buf.push_str(&String::from_utf8_lossy(t.as_ref()));
+            }
+            _ => {}
+        }
+
+        buf.clear();
+        last = pos;
+        if hit.is_some() {
+            break;
+        }
+    }
+
+    let path = hit?;
+    Some(Inspection {
+        format: "plist".into(),
+        summary: path.clone(),
+        detail: json!({ "path": path }),
+    })
+}
+
+/// Determine the path segment for a value, consuming the parent's pending key
+/// or advancing its array index.
+fn take_segment(stack: &mut [Frame]) -> Option<String> {
+    let frame = stack.last_mut()?;
+    if frame.is_dict {
+        Some(frame.pending_key.take().unwrap_or_else(|| "?".into()))
+    } else {
+        let seg = format!("[{}]", frame.array_index);
+        frame.array_index += 1;
+        Some(seg)
+    }
+}
+
+// --- Binary plist ------------------------------------------------------------
+
+/// Parsed structure of a binary plist sufficient to resolve offsets to paths.
+struct Bplist<'a> {
+    content: &'a [u8],
+    offset_size: usize,
+    ref_size: usize,
+    num_objects: usize,
+    top: usize,
+    offset_table: usize,
+}
+
+/// The structural children of one binary-plist object.
+enum Children {
+    Dict(Vec<(usize, usize)>), // (key object, value object)
+    Array(Vec<usize>),
+    Leaf,
+}
+
+fn inspect_binary(content: &[u8], offset: usize) -> Option<Inspection> {
+    let bp = Bplist::parse(content)?;
+
+    // A match in the offset table or trailer is structural, not a value.
+    if offset >= bp.offset_table {
+        return Some(Inspection {
+            format: "bplist".into(),
+            summary: "offset table / trailer".into(),
+            detail: json!({ "region": "offset_table_or_trailer", "offset": offset }),
+        });
+    }
+
+    let oid = bp.object_at_offset(offset)?;
+    let path = bp.path_to(oid).unwrap_or_default();
+    let rendered = render(&path);
+    Some(Inspection {
+        format: "bplist".into(),
+        summary: rendered.clone(),
+        detail: json!({ "path": rendered, "object": oid }),
+    })
+}
+
+impl<'a> Bplist<'a> {
+    fn parse(content: &'a [u8]) -> Option<Self> {
+        if !content.starts_with(b"bplist00") || content.len() < 8 + 32 {
+            return None;
+        }
+        let trailer = content.len() - 32;
+        let offset_size = content[trailer + 6] as usize;
+        let ref_size = content[trailer + 7] as usize;
+        let num_objects = read_be(content, trailer + 8, 8)? as usize;
+        let top = read_be(content, trailer + 16, 8)? as usize;
+        let offset_table = read_be(content, trailer + 24, 8)? as usize;
+        if offset_size == 0 || ref_size == 0 {
+            return None;
+        }
+        Some(Self {
+            content,
+            offset_size,
+            ref_size,
+            num_objects,
+            top,
+            offset_table,
+        })
+    }
+
+    /// File offset where object `oid` begins (from the offset table).
+    fn obj_offset(&self, oid: usize) -> Option<usize> {
+        if oid >= self.num_objects {
+            return None;
+        }
+        let entry = self.offset_table + oid * self.offset_size;
+        Some(read_be(self.content, entry, self.offset_size)? as usize)
+    }
+
+    /// The object whose data region contains `target` (largest start ≤ target).
+    fn object_at_offset(&self, target: usize) -> Option<usize> {
+        let mut best: Option<(usize, usize)> = None; // (oid, start)
+        for oid in 0..self.num_objects {
+            if let Some(start) = self.obj_offset(oid)
+                && start <= target
+                && best.is_none_or(|(_, b)| start > b)
+            {
+                best = Some((oid, start));
+            }
+        }
+        best.map(|(oid, _)| oid)
+    }
+
+    /// Decode an object's structural children (dict pairs / array elements).
+    fn children(&self, oid: usize) -> Children {
+        let Some(off) = self.obj_offset(oid) else {
+            return Children::Leaf;
+        };
+        let Some(&marker) = self.content.get(off) else {
+            return Children::Leaf;
+        };
+        let high = marker >> 4;
+        let low = (marker & 0x0f) as usize;
+        let Some((count, header)) = self.read_count(off, low) else {
+            return Children::Leaf;
+        };
+        let base = off + 1 + header;
+
+        match high {
+            0xD => {
+                let mut pairs = Vec::with_capacity(count);
+                for i in 0..count {
+                    let k = read_be(self.content, base + i * self.ref_size, self.ref_size);
+                    let v = read_be(
+                        self.content,
+                        base + (count + i) * self.ref_size,
+                        self.ref_size,
+                    );
+                    if let (Some(k), Some(v)) = (k, v) {
+                        pairs.push((k as usize, v as usize));
+                    }
+                }
+                Children::Dict(pairs)
+            }
+            0xA | 0xC => {
+                let mut elems = Vec::with_capacity(count);
+                for i in 0..count {
+                    if let Some(e) = read_be(self.content, base + i * self.ref_size, self.ref_size)
+                    {
+                        elems.push(e as usize);
+                    }
+                }
+                Children::Array(elems)
+            }
+            _ => Children::Leaf,
+        }
+    }
+
+    /// Read the element count and the number of header bytes after the marker.
+    ///
+    /// A low nibble of 0xF means the count is an integer object that follows the
+    /// marker; otherwise the nibble is the count itself.
+    fn read_count(&self, off: usize, low: usize) -> Option<(usize, usize)> {
+        if low != 0x0F {
+            return Some((low, 0));
+        }
+        let int_marker = *self.content.get(off + 1)?;
+        let int_size = 1usize << (int_marker & 0x0f);
+        let count = read_be(self.content, off + 2, int_size)? as usize;
+        Some((count, 1 + int_size))
+    }
+
+    /// Decode a string object (ASCII or UTF-16BE) for use as a key name.
+    fn string_value(&self, oid: usize) -> Option<String> {
+        let off = self.obj_offset(oid)?;
+        let marker = *self.content.get(off)?;
+        let high = marker >> 4;
+        let low = (marker & 0x0f) as usize;
+        let (count, header) = self.read_count(off, low)?;
+        let start = off + 1 + header;
+        match high {
+            0x5 => {
+                Some(String::from_utf8_lossy(self.content.get(start..start + count)?).into_owned())
+            }
+            0x6 => {
+                let bytes = self.content.get(start..start + count * 2)?;
+                let units: Vec<u16> = bytes
+                    .chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                Some(String::from_utf16_lossy(&units))
+            }
+            _ => None,
+        }
+    }
+
+    /// Find the dict/array key path from the root object to `target`.
+    fn path_to(&self, target: usize) -> Option<Vec<String>> {
+        let mut result = None;
+        let mut visited = std::collections::HashSet::new();
+        self.walk(self.top, target, &mut Vec::new(), &mut result, &mut visited);
+        result
+    }
+
+    fn walk(
+        &self,
+        oid: usize,
+        target: usize,
+        path: &mut Vec<String>,
+        result: &mut Option<Vec<String>>,
+        visited: &mut std::collections::HashSet<usize>,
+    ) {
+        if result.is_some() {
+            return;
+        }
+        if oid == target {
+            *result = Some(path.clone());
+            return;
+        }
+        if !visited.insert(oid) {
+            return;
+        }
+        match self.children(oid) {
+            Children::Dict(pairs) => {
+                for (k, v) in pairs {
+                    let key = self.string_value(k).unwrap_or_else(|| format!("#{k}"));
+                    if k == target {
+                        let mut p = path.clone();
+                        p.push(key);
+                        *result = Some(p);
+                        return;
+                    }
+                    path.push(key);
+                    self.walk(v, target, path, result, visited);
+                    path.pop();
+                    if result.is_some() {
+                        return;
+                    }
+                }
+            }
+            Children::Array(elems) => {
+                for (i, e) in elems.into_iter().enumerate() {
+                    path.push(format!("[{i}]"));
+                    self.walk(e, target, path, result, visited);
+                    path.pop();
+                    if result.is_some() {
+                        return;
+                    }
+                }
+            }
+            Children::Leaf => {}
+        }
+    }
+}
+
+/// Read a big-endian unsigned integer of `size` bytes (1–8).
+fn read_be(content: &[u8], off: usize, size: usize) -> Option<u64> {
+    let bytes = content.get(off..off + size)?;
+    let mut value = 0u64;
+    for &b in bytes {
+        value = (value << 8) | b as u64;
+    }
+    Some(value)
+}
