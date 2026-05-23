@@ -20,7 +20,7 @@ fn txt_reports_line_and_column() {
     assert_eq!(insp.format, "txt");
     assert_eq!(insp.detail["line"], 2);
     assert_eq!(insp.detail["col"], 1);
-    assert_eq!(insp.summary, "line 2, col 1");
+    assert_eq!(insp.summary, "line: 2  col: 1");
 }
 
 #[test]

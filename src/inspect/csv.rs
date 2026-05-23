@@ -23,9 +23,9 @@ pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
     let header = header_field(content, col);
 
     let summary = match (&header, row) {
-        (_, 1) => format!("header row, col {col}"),
-        (Some(h), _) => format!("row {row}, col {col} ({h})"),
-        (None, _) => format!("row {row}, col {col}"),
+        (_, 1) => format!("row: {row}  col: {col}  (header row)"),
+        (Some(h), _) => format!("row: {row}  col: {col}  header: {h}"),
+        (None, _) => format!("row: {row}  col: {col}"),
     };
     let detail = json!({
         "row": row,

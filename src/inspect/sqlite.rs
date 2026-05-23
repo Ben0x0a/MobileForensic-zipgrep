@@ -61,7 +61,7 @@ pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
     Some(
         resolve(content, &db, offset, page, page_off).unwrap_or_else(|| Inspection {
             format: "sqlite".into(),
-            summary: format!("page {page}, offset {page_off} (not in a table cell)"),
+            summary: format!("page: {page}  offset: {page_off}  (not in a table cell)"),
             detail: json!({ "page": page, "page_offset": page_off }),
         }),
     )
@@ -128,17 +128,19 @@ fn resolve(
                     .get(idx)
                     .cloned()
                     .unwrap_or_else(|| format!("column{idx}"));
+                let cell_value = render_cell(content, col);
                 return Some(Inspection {
                     format: "sqlite".into(),
                     summary: format!(
-                        "table {}, rowid {}, column {}",
-                        table.name, cell.rowid, column
+                        "table: {}  column: {}  row: {}  cell: {}",
+                        table.name, column, cell.rowid, cell_value
                     ),
                     detail: json!({
                         "page": page,
                         "table": table.name,
                         "rowid": cell.rowid,
                         "column": column,
+                        "cell": cell_value,
                     }),
                 });
             }
@@ -148,7 +150,7 @@ fn resolve(
         return Some(Inspection {
             format: "sqlite".into(),
             summary: format!(
-                "table {}, rowid {} (record metadata)",
+                "table: {}  row: {}  (record metadata)",
                 table.name, cell.rowid
             ),
             detail: json!({ "page": page, "table": table.name, "rowid": cell.rowid }),
@@ -328,6 +330,37 @@ fn serial_len(serial: u64) -> usize {
         6 | 7 => 8,
         s if s % 2 == 0 => ((s - 12) / 2) as usize, // BLOB
         s => ((s - 13) / 2) as usize,               // TEXT
+    }
+}
+
+/// Render a column value as a short, text-safe string for display.
+///
+/// Decodes by serial type (NULL / integer / real / text / blob). Text is
+/// length-capped and control characters are stripped, so a cell value never
+/// dumps raw or runaway bytes into the output.
+fn render_cell(content: &[u8], col: &Col) -> String {
+    const MAX: usize = 80;
+    match col.serial {
+        0 => "NULL".into(),
+        8 => "0".into(),
+        9 => "1".into(),
+        1..=6 => col_int(content, Some(col)).map_or_else(String::new, |v| v.to_string()),
+        7 => content
+            .get(col.start..col.start + 8)
+            .and_then(|b| <[u8; 8]>::try_from(b).ok())
+            .map_or_else(String::new, |a| f64::from_be_bytes(a).to_string()),
+        s if s >= 13 && s % 2 == 1 => {
+            let text = col_text(content, Some(col)).unwrap_or_default();
+            let mut out: String = text
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect();
+            if out.chars().count() > MAX {
+                out = out.chars().take(MAX).collect::<String>() + "…";
+            }
+            out
+        }
+        _ => format!("<blob {} bytes>", col.len), // even serial >= 12
     }
 }
 

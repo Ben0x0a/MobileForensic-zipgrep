@@ -8,9 +8,10 @@ End-to-end recipes for common forensic tasks.
 mf-zipgrep search 'IMSI' acquisition.zip
 ```
 
-Output is `path:file_offset:archive_offset:line`. The two offsets let you jump
-straight to the bytes (e.g. with a hex editor) and the path tells you which file
-inside the archive it came from.
+Output is `path:0x<file_offset>` plus, for textual files, the matched line. The
+hex offset lets you jump straight to the bytes (e.g. with a hex editor) and the
+path tells you which file inside the archive it came from. Binary files show the
+location only (no content); use `--inspect` to resolve them.
 
 Useful modifiers:
 
@@ -40,7 +41,7 @@ files:
 
 ```
 mf-zipgrep search 'alice@example.com' acquisition.zip --path '*.sqlite' --inspect
-# sms.db:5242880:...:...  [sqlite table message, rowid 4213, column sender]
+# sms.db:0x500000  [sqlite  table: message  column: sender  row: 4213  cell: alice@example.com]
 ```
 
 In `--format json`, inspection appears as a nested `context` object you can

@@ -32,8 +32,7 @@ use regex::bytes::RegexBuilder;
 use mf_zipgrep::engine::{Findings, Progress, search_with_progress};
 use mf_zipgrep::export::{self, PullOutcome};
 use mf_zipgrep::filter::PathFilter;
-use mf_zipgrep::models::MatchRecord;
-use mf_zipgrep::output::{OutputFormat, write_results};
+use mf_zipgrep::output::{OutputFormat, write_counts, write_results};
 
 /// When to colourise matched text in the output.
 #[derive(Clone, Copy, ValueEnum)]
@@ -102,6 +101,10 @@ struct SearchArgs {
     /// Inspect matching files of supported formats for richer context.
     #[arg(long = "inspect")]
     inspect: bool,
+
+    /// Print only the match count per file (one line per file), not each match.
+    #[arg(short = 'c', long = "count")]
+    count: bool,
 
     /// Write a re-ingestable manifest of matched files (with total size) here.
     #[arg(long = "manifest", value_name = "FILE")]
@@ -233,14 +236,23 @@ fn run_search(cli: SearchArgs) -> Result<()> {
         .with_context(|| format!("cannot mmap archive {}", cli.archive.display()))?;
 
     let filter = PathFilter::new(&cli.path);
-    let findings = search_with_reporter(&mmap, &re, cli.inspect, &filter)?;
+    // --count needs no inspection; skip that work when only counting.
+    let findings = search_with_reporter(&mmap, &re, cli.inspect && !cli.count, &filter)?;
 
-    write_output(
-        &findings.records,
-        cli.format,
-        colourise,
-        cli.output.as_deref(),
-    )?;
+    if cli.count {
+        let counts: Vec<(&str, usize)> = findings
+            .files
+            .iter()
+            .map(|f| (f.entry.name.as_str(), f.offsets.len()))
+            .collect();
+        emit(cli.output.as_deref(), |w| {
+            write_counts(&counts, cli.format, w)
+        })?;
+    } else {
+        emit(cli.output.as_deref(), |w| {
+            write_results(&findings.records, cli.format, colourise, w)
+        })?;
+    }
 
     export_if_requested(&cli, &mmap, &findings)
 }
@@ -381,25 +393,24 @@ fn strip_unit<'a>(s: &'a str, unit: &str) -> Option<&'a str> {
     s.strip_suffix(unit)
 }
 
-/// Send results to the chosen sink: a file when `-o` was given, else stdout.
-fn write_output(
-    records: &[MatchRecord],
-    format: OutputFormat,
-    colourise: bool,
+/// Run `render` against the chosen sink: a file when `-o` was given, else
+/// stdout. Shared by the match output and the `--count` output.
+fn emit(
     output: Option<&std::path::Path>,
+    render: impl FnOnce(&mut dyn Write) -> Result<()>,
 ) -> Result<()> {
     match output {
         Some(path) => {
             let file =
                 File::create(path).with_context(|| format!("cannot create {}", path.display()))?;
             let mut w = BufWriter::new(file);
-            write_results(records, format, colourise, &mut w)?;
+            render(&mut w)?;
             w.flush().context("failed flushing output file")
         }
         None => {
             let stdout = std::io::stdout();
             let mut w = stdout.lock();
-            write_results(records, format, colourise, &mut w)
+            render(&mut w)
         }
     }
 }

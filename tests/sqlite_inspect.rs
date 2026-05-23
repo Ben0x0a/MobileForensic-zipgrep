@@ -25,6 +25,13 @@ fn resolves_text_value_to_table_rowid_column() {
     assert_eq!(insp.detail["table"], "messages");
     assert_eq!(insp.detail["rowid"], 3);
     assert_eq!(insp.detail["column"], "body");
+    // The decoded cell content is included (text-safe), not raw bytes.
+    assert!(
+        insp.detail["cell"]
+            .as_str()
+            .unwrap()
+            .contains("UNIQUE_NEEDLE_42")
+    );
 }
 
 #[test]

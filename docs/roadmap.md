@@ -17,6 +17,14 @@ your validation.
   binary parsers blind would risk silently-wrong results. Drop samples into
   `tests/fixtures/` and they slot into the existing inspector framework.
 
+### Pull sidecar / associated files
+When pulling a matched file, also pull its **associated files** so the artefact
+is complete and analysable later:
+- **SQLite**: the `-wal`, `-shm`, and `-journal` sidecars (uncommitted data lives
+  in the WAL; analysing the `.db` without it can miss or misread recent records).
+- Generalise to a per-format "associated files" rule for future formats.
+Recorded for later (user 2026-05-23).
+
 ### iOS GUID → app-package resolution for `--path`
 On iOS, app data lives under randomised GUID directories
 (`.../Applications/<GUID>/...`). Resolve those GUIDs to human app names
@@ -66,8 +74,15 @@ Grouped by theme. Each is a suggestion; tell me which to commit.
    vetted regexes for common forensic artefacts.
 4. **Exclude filter** — `--not-path GLOB` to complement `--path` (e.g. skip
    `*/Caches/*`).
-5. **Per-file match cap / counts** — `--count` (matches per file) and
-   `--max-matches N` for fast triage and to bound output.
+5. **Per-file match cap** — `--max-matches N` to bound output for fast triage.
+   (`--count` is **done** — shipped.)
+
+### Performance
+13. **Skip media to go faster** — by default (or via `--skip-media`), skip image
+    and video files (jpg, png, heic, gif, mp4, mov, …, detected by magic and
+    extension) so the scan spends time only on data likely to contain text/IOCs.
+    Large acquisitions are mostly photos/videos, so this is a big speed win.
+    Add `--include-media` to override.
 
 ### Inputs
 6. **tar / tar.gz acquisitions** — many full-filesystem iOS images are `.tar`
@@ -86,10 +101,33 @@ Grouped by theme. Each is a suggestion; tell me which to commit.
     SQLite table; an executive summary for a report.
 
 ### Verification
-12. **`verify` subcommand** — given a manifest or an offset, re-read the archive
-    and confirm the bytes still match (and re-hash), for independent checking.
+12. **`--verify` option** (secure, slower) — opt-in flag on `search`/`pull` that
+    hashes the archive **before and after** the run and re-reads matched bytes to
+    confirm they still match, producing an integrity-checked result. Trades speed
+    for a court-defensible guarantee; pairs with the execution log above.
 
 ---
+
+## Next up (selected)
+
+Committed for the next iteration (refinements of the proposals above):
+
+- **`--verify`** (#12, reframed) — an *option*, not a subcommand: hash the
+  archive before & after; secure but slower.
+- **Multi-pattern / IOC sweep** (#1) — `-e PAT` (repeatable) and `-f FILE`.
+- **`--not-path` exclude filter** (#4) — complement to `--path`.
+- **Multiple archives / recursive directory** (#7) — search several archives (or
+  a folder of them) in one run, tagging each result with its source archive.
+
+---
+
+## Maintenance
+
+- **Split long files thematically.** Files over ~400 lines as of v1:
+  `inspect/sqlite.rs` (header / varint+record / b-tree walk / schema-columns),
+  `inspect/plist.rs` (XML plist vs binary `bplist`), and `main.rs` (CLI arg
+  structs / `run_search` / `run_pull` / progress reporter). Split when next
+  touched.
 
 ## Done in v1 (for reference)
 
@@ -99,3 +137,5 @@ Grouped by theme. Each is a suggestion; tell me which to commit.
 - Deep inspection: TXT, JSON, XML, CSV, plist (XML + binary), SQLite.
 - `pull` with stable `<basename>_<hash>` layout, manifest, size cap, and
   manifest re-ingestion (`pull --from-manifest`).
+- `--count` (per-file match counts); output never raw-dumps binary content; hex
+  offsets in txt; labelled `--inspect` tags with decoded SQLite cell values.

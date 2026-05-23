@@ -72,10 +72,11 @@ pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
     }
 
     let path = hit?;
+    let line = super::line_at(content, offset);
     Some(Inspection {
         format: "xml".into(),
-        summary: path.clone(),
-        detail: json!({ "path": path }),
+        summary: format!("path: {path}  line: {line}"),
+        detail: json!({ "path": path, "line": line }),
     })
 }
 

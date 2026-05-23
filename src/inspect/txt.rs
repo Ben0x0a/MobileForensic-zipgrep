@@ -33,7 +33,7 @@ pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
 
     Some(Inspection {
         format: "txt".into(),
-        summary: format!("line {line}, col {col}"),
+        summary: format!("line: {line}  col: {col}"),
         detail: json!({ "line": line, "col": col }),
     })
 }

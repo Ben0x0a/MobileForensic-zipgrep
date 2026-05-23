@@ -36,10 +36,11 @@ pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
     scanner.value(offset, &mut path, &mut found);
 
     let path = found?;
+    let line = super::line_at(content, offset);
     Some(Inspection {
         format: "json".into(),
-        summary: path.clone(),
-        detail: json!({ "path": path }),
+        summary: format!("key: {path}  line: {line}"),
+        detail: json!({ "path": path, "line": line }),
     })
 }
 

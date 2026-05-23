@@ -5,10 +5,9 @@ edition = "2024"
 description = "Fast, forensic-aware regex search inside mobile-acquisition ZIP archives."
 keywords = ["forensics", "zip", "grep", "search", "mobile"]
 categories = ["command-line-utilities", "filesystem"]
-# TODO before publishing: choose a license, set authors/repository.
-# license = "MIT OR Apache-2.0"
-# repository = "https://..."
-# authors = ["..."]
+license = "Apache-2.0"
+# TODO before publishing to crates.io: set the repository URL once the repo exists.
+# repository = "https://github.com/<you>/mf-zipgrep"
 
 [dependencies]
 anyhow = "1.0.102"

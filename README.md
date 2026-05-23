@@ -12,7 +12,7 @@ decompress on the hot path.
 
 ```
 $ mf-zipgrep search 'IMSI' acquisition.zip
-private/var/.../CellularUsage.db:4096:5242880:...IMSI 208...
+private/var/.../CellularUsage.db:0x1f4a:...IMSI 208...
 ```
 
 - **~40–100× faster than `zipgrep`** on STORED archives (memory-mapped, no
@@ -87,6 +87,7 @@ mf-zipgrep search PATTERN ARCHIVE [options]
 | `-E`, `--extended-regexp` | Accepted for grep muscle memory; no-op (the engine is already ERE-like). |
 | `--path GLOB` | Only search files whose internal path matches the wildcard. Repeatable. |
 | `--inspect` | Resolve matches inside recognised formats (see [Inspection](#deep-inspection)). |
+| `-c`, `--count` | Print only the match count per file (one line per file). |
 | `--format txt\|json\|csv` | Output format (default `txt`). |
 | `-o`, `--output FILE` | Write results to a file instead of stdout. |
 | `--colour[=auto\|always\|never]` | Highlight matches (txt to a terminal). `--color` also accepted. |
@@ -111,14 +112,24 @@ out of the archive — **without searching again**. Honours `--max-size`.
 
 ## Output
 
-Default txt is one line per match:
+One line per match; binary file content is **never** raw-dumped. Default txt:
 
 ```
-path:file_offset:archive_offset:line
+path:0x<file_offset>[:line]
 ```
 
-`json` emits a single array of objects; `csv` emits a header row plus one row per
-match. Both carry every field; txt shows the two most useful offsets. See
+The offset is hex (like a hex editor). The matched `line` is shown only for
+**textual** files; binary files (SQLite, bplist, …) show just `path:0x<offset>`.
+`--inspect` appends a labelled tag; `--count` prints `path:count` per file.
+
+```
+notes.txt:0x1a2:the meeting is at 5pm
+sms.db:0x500000                                  (binary: location only)
+sms.db:0x500000  [sqlite  table: message  column: text  row: 4213  cell: hello there]
+```
+
+`json` emits a single array of objects; `csv` a header row plus one row per
+match (offsets are decimal there). See
 [docs/output-and-offsets.md](docs/output-and-offsets.md) for the full schema.
 
 ### Offsets
@@ -147,11 +158,11 @@ It appends `[format summary]` in txt, and a nested `context` object in json.
 | Format | Resolves a match to |
 |---|---|
 | TXT | line and column |
-| JSON | key path, e.g. `$.users[3].token` |
-| XML | element path, e.g. `/plist/dict/string` |
+| JSON | key path + line, e.g. `$.users[3].token` |
+| XML | element path + line, e.g. `/plist/dict/string` |
 | CSV | row, column, and header name |
 | plist (XML & binary `bplist`) | dict-key / array-index path, e.g. `$.Account.Servers[1]` |
-| SQLite | `table`, `rowid`, `column` for live table rows; otherwise `page` + offset-in-page |
+| SQLite | `table`, `column`, `row`, and the **decoded cell value** for live rows; otherwise `page` + offset-in-page |
 
 See [docs/inspectors.md](docs/inspectors.md) for details and [docs/roadmap.md](docs/roadmap.md)
 for planned formats (ABX, SEGB).

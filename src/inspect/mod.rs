@@ -47,6 +47,15 @@ pub fn inspect(name: &str, content: &[u8], offset: usize) -> Option<Inspection> 
     }
 }
 
+/// 1-based line number of `offset` within `content` (newline count + 1).
+///
+/// Shared by the text-based inspectors (JSON, XML, plist-XML) so their summaries
+/// can cite a line, like the TXT inspector.
+pub(crate) fn line_at(content: &[u8], offset: usize) -> usize {
+    let end = offset.min(content.len());
+    1 + content[..end].iter().filter(|&&b| b == b'\n').count()
+}
+
 /// Detect a file's format, preferring the content's header/magic over the file
 /// name extension.
 ///

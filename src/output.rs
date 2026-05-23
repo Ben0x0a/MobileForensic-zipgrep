@@ -1,8 +1,15 @@
 //! Result formatting and writing (txt / json / csv).
 //!
-//! Defines: `OutputFormat` and `write_results`, which render a slice of
-//! `MatchRecord`s to any `Write` sink in the chosen format.
+//! Defines: `OutputFormat`, `write_results` (one line/object per match), and
+//! `write_counts` (one line per file, for `--count`), rendering to any `Write`
+//! sink in the chosen format.
 //! Used by: `main.rs` (picks the format from `--format`, the sink from `-o`).
+//!
+//! Output rules: at most one line per match, and binary file content is never
+//! raw-dumped. The matched line is shown only when it looks textual (see
+//! `is_textual`); offsets in txt are hex (`0x…`). Richer per-format context is
+//! opt-in via `--inspect` and appears as a labelled tag (txt) or `context`
+//! (json/csv).
 //! Uses: `crate::models::MatchRecord`, `serde`/`serde_json` (JSON), `csv` (CSV),
 //! `anyhow` (errors).
 //!
@@ -65,12 +72,29 @@ pub fn write_results(
     }
 }
 
-// The line is lossily decoded to text in the views below; the exact bytes
-// remain recoverable from the offsets (and, later, via the pull step), so a
-// display-oriented format does not need to preserve them verbatim.
+// The matched line is shown only when it looks textual; for binary files the
+// exact bytes remain recoverable from the offsets (and via the pull step), so a
+// display-oriented format never raw-dumps binary content.
 
-/// JSON projection: inspection appears as a nested `context` object plus a
-/// `format` tag, both omitted when the match was not inspected.
+/// Heuristic: does this line look like text rather than binary?
+///
+/// Binary if it contains a NUL or any C0 control byte other than the usual
+/// whitespace (tab, LF, VT, FF, CR). High bytes (>= 0x80) are allowed as
+/// possible UTF-8. A single stray control byte marks the line binary — which is
+/// what suppresses content for SQLite, bplist, and other binary files.
+fn is_textual(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .all(|&b| b >= 0x20 || matches!(b, b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+}
+
+/// The matched line, lossily decoded, but only when textual (else `None`).
+fn textual_line(r: &MatchRecord) -> Option<Cow<'_, str>> {
+    is_textual(&r.line).then(|| String::from_utf8_lossy(&r.line))
+}
+
+/// JSON projection: `line` appears only for textual matches; `format`/`context`
+/// only when the match was inspected (`--inspect`).
 #[derive(Serialize)]
 struct JsonView<'a> {
     path: &'a str,
@@ -83,7 +107,8 @@ struct JsonView<'a> {
     format: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<&'a serde_json::Value>,
-    line: Cow<'a, str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<Cow<'a, str>>,
 }
 
 impl<'a> From<&'a MatchRecord> for JsonView<'a> {
@@ -96,14 +121,13 @@ impl<'a> From<&'a MatchRecord> for JsonView<'a> {
             compressed: r.compressed,
             format: r.inspection.as_ref().map(|i| i.format.as_str()),
             context: r.inspection.as_ref().map(|i| &i.detail),
-            line: String::from_utf8_lossy(&r.line),
+            line: textual_line(r),
         }
     }
 }
 
-/// CSV projection: flat, fixed columns. Inspection collapses to a `format` tag
-/// and a human `context` summary, both empty strings when not inspected (so the
-/// column set never varies between rows).
+/// CSV projection: flat, fixed columns (so the column set never varies).
+/// `format`/`context` are empty unless inspected; `line` is empty for binary.
 #[derive(Serialize)]
 struct CsvView<'a> {
     path: &'a str,
@@ -126,36 +150,70 @@ impl<'a> From<&'a MatchRecord> for CsvView<'a> {
             compressed: r.compressed,
             format: r.inspection.as_ref().map_or("", |i| i.format.as_str()),
             context: r.inspection.as_ref().map_or("", |i| i.summary.as_str()),
-            line: String::from_utf8_lossy(&r.line),
+            line: textual_line(r).unwrap_or(Cow::Borrowed("")),
         }
     }
 }
 
-/// txt: one line per match — `path:file_offset:archive_offset:line`.
+/// txt: one line per match — `path:0x<file_offset>` plus, for textual files, the
+/// matched line, plus a labelled `[format summary]` tag when inspected.
 ///
-/// For DEFLATE entries the archive offset is prefixed with `~` to flag that it
-/// is the compressed blob's start, not the exact match byte (which has no
-/// single archive position). When the match was inspected, a `[format summary]`
-/// tag is appended.
+/// The offset is hex (`0x…`) to match how analysts read a hex editor. Binary
+/// files contribute only `path:0x<offset>` — their bytes are never dumped.
 fn write_txt(records: &[MatchRecord], colourise: bool, w: &mut dyn Write) -> Result<()> {
     for r in records {
-        let archive_offset = if r.compressed {
-            format!("~{}", r.archive_offset)
-        } else {
-            r.archive_offset.to_string()
-        };
-        let mut line = render_line(r, colourise);
-        if let Some(i) = &r.inspection {
-            line = format!("{line}  [{} {}]", i.format, i.summary);
+        let mut out = format!("{}:0x{:x}", r.path, r.file_offset);
+        if is_textual(&r.line) {
+            out.push(':');
+            out.push_str(&render_line(r, colourise));
         }
-        writeln!(
-            w,
-            "{}:{}:{}:{}",
-            r.path, r.file_offset, archive_offset, line
-        )
-        .context("failed writing txt output")?;
+        if let Some(i) = &r.inspection {
+            out.push_str(&format!("  [{}  {}]", i.format, i.summary));
+        }
+        writeln!(w, "{out}").context("failed writing txt output")?;
     }
     Ok(())
+}
+
+/// Per-file match counts (for `--count`).
+#[derive(Serialize)]
+struct CountView<'a> {
+    path: &'a str,
+    count: usize,
+}
+
+/// Write one `path:count` per file (txt), or a structured equivalent (json/csv).
+pub fn write_counts(
+    counts: &[(&str, usize)],
+    format: OutputFormat,
+    w: &mut dyn Write,
+) -> Result<()> {
+    match format {
+        OutputFormat::Txt => {
+            for (path, count) in counts {
+                writeln!(w, "{path}:{count}").context("failed writing count output")?;
+            }
+            Ok(())
+        }
+        OutputFormat::Json => {
+            let views: Vec<CountView> = counts
+                .iter()
+                .map(|&(path, count)| CountView { path, count })
+                .collect();
+            serde_json::to_writer_pretty(&mut *w, &views).context("failed writing count output")?;
+            writeln!(w).context("failed writing count output")?;
+            Ok(())
+        }
+        OutputFormat::Csv => {
+            let mut wtr = csv::Writer::from_writer(w);
+            for &(path, count) in counts {
+                wtr.serialize(CountView { path, count })
+                    .context("failed writing count row")?;
+            }
+            wtr.flush().context("failed flushing count output")?;
+            Ok(())
+        }
+    }
 }
 
 /// json: a single pretty-printed array of record objects (re-ingestable).

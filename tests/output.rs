@@ -6,8 +6,22 @@
 //! Uses: `mf_zipgrep::{models, output}`, `serde_json` (to parse JSON back).
 
 use mf_zipgrep::models::{Inspection, MatchRecord};
-use mf_zipgrep::output::{OutputFormat, write_results};
+use mf_zipgrep::output::{OutputFormat, write_counts, write_results};
 use serde_json::json;
+
+/// A match whose surrounding bytes are binary (contain a NUL).
+fn binary_record() -> Vec<MatchRecord> {
+    vec![MatchRecord {
+        path: "db.sqlite".into(),
+        file_start: 0,
+        file_offset: 4096, // 0x1000
+        archive_offset: 4096,
+        compressed: false,
+        line: b"\x00\x01record\x00data".to_vec(),
+        match_in_line: 2..8,
+        inspection: None,
+    }]
+}
 
 fn sample() -> Vec<MatchRecord> {
     vec![
@@ -41,12 +55,13 @@ fn render(records: &[MatchRecord], format: OutputFormat, colourise: bool) -> Str
 }
 
 #[test]
-fn txt_lists_path_and_both_offsets() {
+fn txt_lists_path_offset_and_textual_line() {
     let out = render(&sample(), OutputFormat::Txt, false);
 
+    // path:0x<file_offset hex>:<line> for textual content (0x11 = 17, 0xc = 12).
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines[0], "sub/b.log:17:117:another SECRET line");
-    assert_eq!(lines[1], "a.txt:12:212:secret token: ABC");
+    assert_eq!(lines[0], "sub/b.log:0x11:another SECRET line");
+    assert_eq!(lines[1], "a.txt:0xc:secret token: ABC");
 }
 
 #[test]
@@ -90,7 +105,7 @@ fn csv_has_header_and_rows() {
 }
 
 #[test]
-fn txt_flags_compressed_archive_offset_with_tilde() {
+fn txt_shows_hex_file_offset_for_compressed() {
     let records = vec![MatchRecord {
         path: "c.bin".into(),
         file_start: 50,
@@ -104,7 +119,9 @@ fn txt_flags_compressed_archive_offset_with_tilde() {
 
     let out = render(&records, OutputFormat::Txt, false);
 
-    assert_eq!(out.lines().next().unwrap(), "c.bin:10:~50:NEEDLE inside");
+    // txt shows the (hex) offset within the decompressed file; the compressed
+    // flag and blob start live in the json/csv `compressed`/`archive_offset`.
+    assert_eq!(out.lines().next().unwrap(), "c.bin:0xa:NEEDLE inside");
 }
 
 fn inspected() -> Vec<MatchRecord> {
@@ -130,7 +147,7 @@ fn txt_appends_inspection_summary() {
 
     assert_eq!(
         out.lines().next().unwrap(),
-        "a.txt:12:12:has TARGET here  [txt line 2, col 5]"
+        "a.txt:0xc:has TARGET here  [txt  line 2, col 5]"
     );
 }
 
@@ -152,6 +169,37 @@ fn csv_fills_format_and_context_columns() {
     let row = out.lines().nth(1).unwrap();
     // ...,compressed,format,context,line
     assert!(row.contains(",txt,\"line 2, col 5\","));
+}
+
+#[test]
+fn txt_suppresses_binary_line() {
+    let out = render(&binary_record(), OutputFormat::Txt, false);
+    // Binary content is never dumped: only path:0x<offset> (0x1000 = 4096).
+    assert_eq!(out.lines().next().unwrap(), "db.sqlite:0x1000");
+}
+
+#[test]
+fn json_omits_line_for_binary() {
+    let out = render(&binary_record(), OutputFormat::Json, false);
+    let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(parsed[0].get("line").is_none()); // no binary content
+    assert_eq!(parsed[0]["file_offset"], 4096); // location still reported
+}
+
+#[test]
+fn count_writes_one_line_per_file() {
+    let mut buf = Vec::new();
+    write_counts(
+        &[("a/x.db", 3), ("b/y.txt", 1)],
+        OutputFormat::Txt,
+        &mut buf,
+    )
+    .unwrap();
+    let out = String::from_utf8(buf).unwrap();
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        vec!["a/x.db:3", "b/y.txt:1"]
+    );
 }
 
 #[test]
