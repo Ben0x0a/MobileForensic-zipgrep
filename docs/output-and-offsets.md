@@ -120,14 +120,15 @@ app.json:1
 | `csv`    | `{ "row": N, "col": N, "header": "..." }` | `row: N  col: N  header: H` |
 | `plist`  | `{ "path": "$.Account.Servers[1]", "line": N }` | `key: $.Account.Servers[1]  line: N` |
 | `bplist` | `{ "path": "...", "object": N }` | `key: $.Account.Servers[1]` |
-| `sqlite` (in a row) | `{ "page": N, "table": "...", "rowid": N, "column": "...", "cell": "..." }` | `table: T  column: C  row: R  cell: V` |
+| `sqlite` (in a row) | `{ "page": N, "table": "...", "rowid": N, "column": "...", "type": "TEXT", "cell": "..." }` | `table: T  column: C [TYPE]  row: R  cell: V` |
+| `sqlite` (BLOB cell, recognised) | the above **plus** `"blob_format": "bplist"` and `"blob_context": { … }` | `… [BLOB]  cell: <blob N bytes>  blob: bplist  key: $.…` |
 | `sqlite` (elsewhere) | `{ "page": N, "page_offset": N }` | `page: N  offset: N  (not in a table cell)` |
 
 `cell` (and the txt `cell:` field) is the **decoded**, length-capped, text-safe
 value — a TEXT/INTEGER/REAL value as text, a NULL as `NULL`, a BLOB as
 `<blob N bytes>`. Raw bytes are never shown.
 
-## Manifest schema (`--manifest` / `pull --from-manifest`)
+## Manifest schema (`--manifest` / `export --from-manifest`)
 
 ```json
 {
@@ -146,8 +147,8 @@ value — a TEXT/INTEGER/REAL value as text, a NULL as `NULL`, a BLOB as
 ```
 
 - `total_size` is the sum of `size` over all matched files — known *before* you
-  pull.
+  export.
 - `output_path` is the relative path the file will be written to under `--to`.
 - `offsets` are the `file_offset`s of every match in that file.
-- `pull --from-manifest` reuses `output_path` and locates each file by
+- `export --from-manifest` reuses `output_path` and locates each file by
   `internal_path`; missing entries are reported as skipped.

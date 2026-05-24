@@ -23,6 +23,18 @@ use crate::models::Inspection;
 pub struct Foo;
 
 impl super::Inspector for Foo {
+    /// Short format tag — the `--type` value for this exact format and the
+    /// `format` shown in output (e.g. `"foo"`).
+    fn name(&self) -> &'static str {
+        "foo"
+    }
+
+    /// Coarse group for `--type` family selection, e.g. `"media"`, `"database"`,
+    /// `"structured"`, `"text"`.
+    fn category(&self) -> &'static str {
+        "structured"
+    }
+
     /// File-name extensions (lowercase, no dot) for fallback detection when the
     /// content has no recognisable header.
     fn extensions(&self) -> &'static [&'static str] {
@@ -61,7 +73,7 @@ impl super::Inspector for Foo {
         })
     }
 
-    /// Optional: sidecar files pulled alongside a matched file of this format
+    /// Optional: sidecar files exported alongside a matched file of this format
     /// (suffixes appended to the file name, e.g. SQLite's `-wal`). Delete this
     /// method if the format has none — the default returns an empty list.
     fn sidecars(&self) -> &'static [&'static str] {

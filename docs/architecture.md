@@ -11,14 +11,17 @@ src/
   models.rs     data containers: Method, Entry, SearchHit, MatchRecord, Inspection
   zip.rs        ZIP central-directory parser (STORED + DEFLATE, ZIP64)
   search.rs     per-entry byte search (regex::bytes) + DEFLATE inflate + line preview
-  engine.rs     orchestration: parse + parallel search -> Findings; Progress trait
-  filter.rs     EntryFilter: include/exclude globs (--path/--not-path) + skip-media
+  engine.rs     orchestration: parse + parallel search (or --match-path) -> Findings
+  filter.rs     EntryFilter: path globs (--path/--not-path) + --type / media skip
   fast.rs       the --fast preset's customisable exclude list
-  inspect/      deep "what does this match mean" inspectors
-    mod.rs        Inspector trait + registry + detection (header-first) + dispatch
-    txt.rs json.rs xml.rs csv.rs plist.rs sqlite.rs
+  inspect/      deep "what does this match mean" inspectors + file-type detection
+    mod.rs        Inspector trait (name/category/detect/inspect) + registry +
+                  detection (header-first) + detect_type (drives --type/skip-media)
+    txt.rs json.rs xml.rs csv.rs plist.rs sqlite.rs   (resolve offsets)
+    media/        the `media` category: mod.rs (macro + magic + re-exports) and
+                  one file per format (jpeg.rs … mp3.rs), classification only
   output.rs     format match records to txt / json / csv
-  export.rs     plan output paths, write manifest, pull files (+ sidecars) to disk
+  export.rs     plan output paths, write manifest, export files (+ sidecars) to disk
 ```
 
 ## Data flow
@@ -30,11 +33,14 @@ archive bytes (mmap)
  zip::parse_entries ──► Vec<Entry>            (central-directory walk, ZIP64)
       │
       ▼
- filter (EntryFilter) ──► entries to search  (--path/--not-path, skip-media)
+ filter.selects(path) ──► entries to search   (--path/--not-path, path-only)
       │
       ▼  (rayon, in parallel, per entry)
  search::entry_content ─► STORED: borrow mmap slice
                           DEFLATE: inflate into an owned buffer
+      │
+      ▼  inspect::detect_type (header-first) ─► filter.accepts_type
+      │                         (--type allowlist / media skip; drop if excluded)
       │
       ▼
  search::search_bytes  ─► Vec<SearchHit>  (offset, line preview, match span)
@@ -44,16 +50,16 @@ archive bytes (mmap)
  engine::Findings { records: Vec<MatchRecord>, files: Vec<MatchedFile> }
       │                         │
       ▼                         ▼
- output::write_results     export::plan ─► write_manifest / pull
+ output::write_results     export::plan ─► write_manifest / export_files
  (txt / json / csv)        (DIR/<basename>_<hash>/<basename>)
 ```
 
 `engine::search_archive` produces **both** outputs in a single pass:
 
 - `records` — one `MatchRecord` per match (for display/output).
-- `files` — one `MatchedFile` per matched file, de-duplicated (for the pull step).
+- `files` — one `MatchedFile` per matched file, de-duplicated (for the export step).
 
-So printing matches and pulling files never re-scan the archive.
+So printing matches and exporting files never re-scan the archive.
 
 ## Why these choices
 
@@ -71,13 +77,17 @@ So printing matches and pulling files never re-scan the archive.
 - **Library has no UI.** `engine::Progress` is a trait the engine calls; the
   terminal reporter lives in `main`. `output::OutputFormat` parses via `FromStr`,
   not clap's `ValueEnum`, so the core never depends on the CLI framework.
-- **Inspectors are a small API.** Each format is an `Inspector` (trait in
-  `inspect/mod.rs`): `extensions`, `detect` (header), `inspect` (resolve), and
-  optional `sidecars`. The shared core (header-first detection,
-  dispatch, output) lives in `mod.rs`; adding a format is a new submodule
-  implementing the trait plus one line in the `INSPECTORS` registry. A format's
-  associated files (e.g. SQLite's `-wal`) are declared by its `sidecars()`, which
-  `export` pulls automatically. See `docs/inspectors.md` + `inspector-template.rs`.
+- **Inspectors are a small API, reused for three jobs.** Each format is an
+  `Inspector` (trait in `inspect/mod.rs`): `name`, `category`, `extensions`,
+  `detect` (header), `inspect` (resolve), and optional `sidecars`. The same
+  registry powers (1) deep inspection, (2) `--type`/media filtering via
+  `detect_type` (header-first, then extension), and (3) BLOB classification
+  inside SQLite via `detect_by_header` — so a file format is described once.
+  Media formats are *classification-only* (one file per format, built on the
+  `media_inspector!` macro); they detect but do not resolve. Adding a format is a
+  new submodule plus one line in `INSPECTORS`. A format's associated files (e.g.
+  SQLite's `-wal`) are declared by its `sidecars()`, which `export` copies
+  automatically. See `docs/inspectors.md` + `inspector-template.rs`.
 - **Errors, not panics.** All parsing uses bounds-checked reads that return
   `Result`; anything an inspector can't resolve degrades gracefully (e.g. SQLite
   falls back to `page + offset`) rather than erroring — forensic inputs are

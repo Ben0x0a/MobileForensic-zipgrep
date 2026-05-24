@@ -17,8 +17,8 @@ your validation.
   binary parsers blind would risk silently-wrong results. Drop samples into
   `tests/fixtures/` and they slot into the existing inspector framework.
 
-### Pull sidecar / associated files
-When pulling a matched file, also pull its **associated files** so the artefact
+### Export sidecar / associated files
+When exporting a matched file, also export its **associated files** so the artefact
 is complete and analysable later:
 - **SQLite**: the `-wal`, `-shm`, and `-journal` sidecars (uncommitted data lives
   in the WAL; analysing the `.db` without it can miss or misread recent records).
@@ -54,7 +54,7 @@ A first-class **chain-of-custody / traceability** feature:
   - Trade-off: hashing a multi-hundred-GB archive twice is I/O-heavy, so make it
     opt-in; consider recording a hash supplied by the acquisition tool when
     present, to avoid a full re-read.
-- **Per-file hashes on pull**: record a SHA-256 of each pulled file in the
+- **Per-file hashes on export**: record a SHA-256 of each exported file in the
   manifest, so exported artefacts carry their own integrity value.
 
 ---
@@ -101,7 +101,7 @@ Grouped by theme. Each is a suggestion; tell me which to commit.
     SQLite table; an executive summary for a report.
 
 ### Verification
-12. **`--verify` option** (secure, slower) — opt-in flag on `search`/`pull` that
+12. **`--verify` option** (secure, slower) — opt-in flag on `search`/`export` that
     hashes the archive **before and after** the run and re-reads matched bytes to
     confirm they still match, producing an integrity-checked result. Trades speed
     for a court-defensible guarantee; pairs with the execution log above.
@@ -112,10 +112,23 @@ Grouped by theme. Each is a suggestion; tell me which to commit.
 
 - **Skip media by default** (#13) + `--include-media`.
 - **`--not-path` exclude filter** (#4).
-- **Pull SQLite sidecars** (`-wal`/`-shm`/`-journal`) alongside a matched DB.
+- **Export SQLite sidecars** (`-wal`/`-shm`/`-journal`) alongside a matched DB.
 - **`--verify`** (#12) — SHA-256 the archive before & after (integrity attestation).
 - **Multiple archives / directory** (#7) — search several archives (or a folder
   of them) in one run, tagging each result with its source archive.
+
+## Done since v2
+
+- **`--type` file-type filter** — header-first (then extension) format/category
+  filter, reusing the inspector registry. One inspector per media format
+  (`media` category); the media skip is now just `--type` excluding `media`.
+- **`--match-path`** — apply the pattern to each file's internal path and list
+  matching files (no content read); composes with `--export`/`--manifest`.
+- **SQLite column type + BLOB dispatch** — `column [TYPE]` in output; a BLOB cell
+  is classified by signature and, when recognised (e.g. an embedded `bplist`),
+  resolved by that inspector (`blob_format` / `blob_context`).
+- **`pull` → `export`** — the subcommand and `--pull` flag are now `export` /
+  `--export` (the file-copying action; *extract* stays reserved for `--inspect`).
 
 ## v3 (later)
 
@@ -132,7 +145,7 @@ the long-file refactor.
 - **Split long files thematically.** Files over ~400 lines as of v1:
   `inspect/sqlite.rs` (header / varint+record / b-tree walk / schema-columns),
   `inspect/plist.rs` (XML plist vs binary `bplist`), and `main.rs` (CLI arg
-  structs / `run_search` / `run_pull` / progress reporter). Split when next
+  structs / `run_search` / `run_export` / progress reporter). Split when next
   touched.
 
 ## Done in v1 (for reference)
@@ -141,7 +154,7 @@ the long-file refactor.
 - Four offsets per match; txt / json / csv output; match highlighting.
 - `--path` wildcard filter; live progress hint (terminal only).
 - Deep inspection: TXT, JSON, XML, CSV, plist (XML + binary), SQLite.
-- `pull` with stable `<basename>_<hash>` layout, manifest, size cap, and
-  manifest re-ingestion (`pull --from-manifest`).
+- `export` with stable `<basename>_<hash>` layout, manifest, size cap, and
+  manifest re-ingestion (`export --from-manifest`).
 - `--count` (per-file match counts); output never raw-dumps binary content; hex
   offsets in txt; labelled `--inspect` tags with decoded SQLite cell values.

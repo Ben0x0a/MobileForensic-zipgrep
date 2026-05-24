@@ -17,11 +17,27 @@ extension only decides formats that have no magic bytes (JSON, CSV, TXT).
 | plist (binary) | `bplist00` | `.plist` |
 | plist (XML) | `<?xml …` containing `<plist`/`DOCTYPE plist` | `.plist` |
 | XML | `<?xml …` (non-plist) | `.xml` |
+| media (image/video/audio) | per-format signatures — JPEG/PNG/GIF/TIFF/HEIF/…, MP4/MOV/MKV/WebM/…, MP3/FLAC/OGG/WAV/… | `.jpg .png … .mp4 … .mp3 …` |
 | JSON | — | `.json` |
 | CSV | — | `.csv` |
 | TXT | — | `.txt .log .text` |
 
 A file that matches no inspector is reported as a plain match (no `context`).
+
+## Type and category (`--type`, media skip)
+
+Every inspector also declares a `name()` (its format tag, e.g. `sqlite`, `jpeg`)
+and a `category()` (a coarse group: `database`, `structured`, `text`, `media`).
+`--type` accepts either, so `--type sqlite` selects one format while `--type
+media` selects every image/video/audio format at once. The **media skip** (on by
+default, off with `--include-media`) is just this machinery excluding the `media`
+category — so there is no separate, duplicated media extension list. Media
+inspectors are *classification only*: they recognise the format (so `--type` and
+the skip work) but do not resolve an offset, so they add no `context`. They live
+in their own category folder `inspect/media/`, one file **per format** (e.g.
+`inspect/media/jpeg.rs`), built on the shared `media_inspector!` macro in that
+folder's `mod.rs` (the category aggregator). The top-level `inspect/` therefore
+holds only file-type inspectors plus the module root.
 
 ## What each inspector resolves
 
@@ -58,7 +74,15 @@ Parses the database header (page size), then the b-tree:
 
 - If the offset lands in a **live table-leaf cell**, it resolves to
   `table + rowid + column` (column names come from the `CREATE TABLE` SQL in the
-  schema; the cell's record format gives the column byte spans).
+  schema; the cell's record format gives the column byte spans). The column's
+  storage type is shown next to its name — `column: body [TEXT]` — derived from
+  the record serial type (`NULL`/`INTEGER`/`REAL`/`TEXT`/`BLOB`).
+- When the matched cell is a **BLOB**, its bytes are run back through the same
+  header detection: if the blob is itself a recognised format (e.g. a `bplist`
+  embedded in a column), that inspector resolves the match inside the blob, and
+  the result is attached as `blob_format` + `blob_context` (json) / appended to
+  the summary (`… blob: bplist  key: $.Account.Servers`). No SQLite-specific
+  format parsing is duplicated — it reuses the inspector registry.
 - Otherwise — freelist pages, free blocks, interior/overflow pages, unallocated
   space — it reports just `page` + `offset-in-page`.
 
@@ -71,6 +95,8 @@ Every format is an `Inspector` (the trait in `src/inspect/mod.rs`):
 
 ```rust
 pub trait Inspector: Sync {
+    fn name(&self) -> &'static str;                  // format tag / --type value
+    fn category(&self) -> &'static str;              // group, e.g. "media", "database"
     fn extensions(&self) -> &'static [&'static str]; // fallback detection
     fn detect(&self, content: &[u8]) -> bool;        // header/magic (preferred)
     fn inspect(&self, content: &[u8], offset: usize) -> Option<Inspection>;
@@ -91,7 +117,9 @@ inspectors reuse rather than duplicate them.
 
 1. Copy [`inspector-template.rs`](inspector-template.rs) to
    `src/inspect/<format>.rs` and `mod <format>;` it in `src/inspect/mod.rs`.
-2. Fill in `extensions` / `detect` / `inspect` (and `sidecars` if any).
+2. Fill in `name` / `category` / `extensions` / `detect` / `inspect` (and
+   `sidecars` if any). A *classification-only* media format needs no `inspect`
+   body — use the `media_inspector!` macro (see `src/inspect/media/jpeg.rs`).
 3. Register it: add `&<format>::Foo` to `INSPECTORS` in `src/inspect/mod.rs` —
    **list more specific formats first**, because `detect` (header) checks run in
    order (e.g. plist before generic XML).
@@ -100,9 +128,9 @@ inspectors reuse rather than duplicate them.
 
 ### Sidecars (associated files)
 
-A format declares the files pulled alongside a match via `sidecars()` — suffixes
+A format declares the files exported alongside a match via `sidecars()` — suffixes
 appended to the file name, e.g. SQLite returns `["-wal", "-shm", "-journal"]`.
-`pull` fetches them automatically (`inspect::sidecars_for`), so adding a format's
+`export` fetches them automatically (`inspect::sidecars_for`), so adding a format's
 sidecars is one line in its inspector — `export.rs` needs no change.
 
 ## Planned
