@@ -1,6 +1,6 @@
 //! mf-zipgrep — fast, forensic-aware regex search inside ZIP acquisitions.
 //!
-//! Defines: the binary entry point, CLI parsing (the `search` and `pull`
+//! Defines: the binary entry point, CLI parsing (the `search` and `export`
 //! subcommands), and orchestration that ties the parser, the search engine, the
 //! inspectors and the output/export writers together.
 //! Used by: invoked from the shell (`mf-zipgrep search PATTERN ARCHIVE`).
@@ -30,9 +30,10 @@ use memmap2::Mmap;
 use regex::bytes::RegexBuilder;
 
 use mf_zipgrep::engine::{Findings, Progress, search_with_progress};
-use mf_zipgrep::export::{self, PullOutcome};
+use mf_zipgrep::export::{self, ExportOutcome};
 use mf_zipgrep::fast::FAST_EXCLUDE_GLOBS;
 use mf_zipgrep::filter::EntryFilter;
+use mf_zipgrep::inspect::{is_known_type, type_names};
 use mf_zipgrep::output::{OutputFormat, write_counts, write_results};
 
 /// When to colourise matched text in the output.
@@ -56,8 +57,8 @@ struct Cli {
 enum Command {
     /// Search for a regex inside the files of a ZIP archive.
     Search(SearchArgs),
-    /// Pull files listed in a manifest out of a ZIP archive (no search).
-    Pull(PullArgs),
+    /// Export files listed in a manifest out of a ZIP archive (no search).
+    Export(ExportArgs),
 }
 
 /// Arguments for `search`.
@@ -111,6 +112,13 @@ struct SearchArgs {
     #[arg(long = "not-path", value_name = "GLOB")]
     not_path: Vec<String>,
 
+    /// Only search files of this type — a format name (e.g. `sqlite`, `jpeg`) or
+    /// a category (e.g. `media`, `database`, `structured`, `text`). The type is
+    /// detected by content header first, then file extension. Repeatable; an
+    /// entry matching any value is searched.
+    #[arg(long = "type", value_name = "TYPE")]
+    file_type: Vec<String>,
+
     /// Search image/video/audio files too (they are skipped by default, as they
     /// hold no searchable text and dominate acquisition size).
     #[arg(long = "include-media")]
@@ -120,6 +128,12 @@ struct SearchArgs {
     /// `src/fast.rs`). Bundles the common speed options behind one flag.
     #[arg(long = "fast")]
     fast: bool,
+
+    /// Match the PATTERN against each file's internal path instead of its
+    /// content, listing the files whose path matches (e.g. PATTERN `banking`
+    /// finds every file with "banking" in its path). No file content is read.
+    #[arg(long = "match-path")]
+    match_path: bool,
 
     /// Inspect matching files of supported formats for richer context.
     #[arg(long = "inspect")]
@@ -133,11 +147,11 @@ struct SearchArgs {
     #[arg(long = "manifest", value_name = "FILE")]
     manifest: Option<PathBuf>,
 
-    /// Also pull matched files into this directory (one-step).
-    #[arg(long = "pull", value_name = "DIR")]
-    pull: Option<PathBuf>,
+    /// Also export matched files into this directory (one-step).
+    #[arg(long = "export", value_name = "DIR")]
+    export: Option<PathBuf>,
 
-    /// Refuse pulling if matched files exceed this size (e.g. 200MB, 1G).
+    /// Refuse exporting if matched files exceed this size (e.g. 200MB, 1G).
     #[arg(long = "max-size", value_name = "SIZE", value_parser = parse_size)]
     max_size: Option<u64>,
 
@@ -158,10 +172,10 @@ struct SearchArgs {
     colour: ColourWhen,
 }
 
-/// Arguments for `pull`.
+/// Arguments for `export`.
 #[derive(Args)]
-struct PullArgs {
-    /// ZIP archive to pull files from.
+struct ExportArgs {
+    /// ZIP archive to export files from.
     archive: PathBuf,
 
     /// Manifest written by a previous `search --manifest`.
@@ -185,12 +199,12 @@ struct PullArgs {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Search(args) => run_search(args),
-        Command::Pull(args) => run_pull(args),
+        Command::Export(args) => run_export(args),
     }
 }
 
-/// Run the `pull` subcommand: re-ingest files listed in a manifest.
-fn run_pull(args: PullArgs) -> Result<()> {
+/// Run the `export` subcommand: re-ingest files listed in a manifest.
+fn run_export(args: ExportArgs) -> Result<()> {
     let mmap = open_archive(&args.archive)?;
     let verify_before = args.verify.then(|| sha256_hex(&mmap));
 
@@ -198,8 +212,8 @@ fn run_pull(args: PullArgs) -> Result<()> {
         .with_context(|| format!("cannot open manifest {}", args.from_manifest.display()))?;
     let manifest = export::read_manifest(BufReader::new(manifest_file))?;
 
-    match export::pull_from_manifest(&manifest, &mmap, &args.to, args.max_size)? {
-        PullOutcome::Pulled {
+    match export::export_from_manifest(&manifest, &mmap, &args.to, args.max_size)? {
+        ExportOutcome::Exported {
             files,
             bytes,
             skipped,
@@ -210,13 +224,13 @@ fn run_pull(args: PullArgs) -> Result<()> {
                 String::new()
             };
             eprintln!(
-                "pulled {files} files ({bytes} bytes) to {}{note}",
+                "exported {files} files ({bytes} bytes) to {}{note}",
                 args.to.display()
             );
         }
-        PullOutcome::Refused { total_size, cap } => {
+        ExportOutcome::Refused { total_size, cap } => {
             eprintln!(
-                "refusing to pull: manifest total {total_size} bytes exceeds --max-size {cap}; nothing written"
+                "refusing to export: manifest total {total_size} bytes exceeds --max-size {cap}; nothing written"
             );
         }
     }
@@ -269,8 +283,8 @@ fn run_search(cli: SearchArgs) -> Result<()> {
         anyhow::bail!("no archives given — list archive files, or use -r with a directory");
     }
     let multi = sources.len() > 1;
-    if multi && (cli.pull.is_some() || cli.manifest.is_some()) {
-        anyhow::bail!("--pull/--manifest require a single archive");
+    if multi && (cli.export.is_some() || cli.manifest.is_some()) {
+        anyhow::bail!("--export/--manifest require a single archive");
     }
 
     // --fast bundles the speed options: skip media (default) + all cores
@@ -279,7 +293,27 @@ fn run_search(cli: SearchArgs) -> Result<()> {
     if cli.fast {
         excludes.extend(FAST_EXCLUDE_GLOBS.iter().map(|g| g.to_string()));
     }
-    let filter = EntryFilter::new(&cli.path, &excludes, !cli.include_media);
+    for t in &cli.file_type {
+        if !is_known_type(t) {
+            anyhow::bail!(
+                "unknown --type '{t}'; valid values: {}",
+                type_names().join(", ")
+            );
+        }
+    }
+
+    // --match-path reads no content, so anything needing the file's bytes is
+    // meaningless alongside it.
+    if cli.match_path {
+        if cli.inspect {
+            anyhow::bail!("--match-path cannot be combined with --inspect (no content is read)");
+        }
+        if !cli.file_type.is_empty() {
+            anyhow::bail!("--match-path cannot be combined with --type (no content is read)");
+        }
+    }
+
+    let filter = EntryFilter::new(&cli.path, &excludes, &cli.file_type, !cli.include_media);
 
     if cli.count {
         // Per-file counts aggregated across archives (path tagged when multi).
@@ -287,7 +321,7 @@ fn run_search(cli: SearchArgs) -> Result<()> {
         for src in &sources {
             let mmap = open_archive(&src.path)?;
             let verify_before = cli.verify.then(|| sha256_hex(&mmap));
-            let findings = search_with_reporter(&mmap, &re, false, &filter)?;
+            let findings = search_with_reporter(&mmap, &re, false, cli.match_path, &filter)?;
             for f in &findings.files {
                 let path = if multi {
                     format!("{}/{}", src.label, f.entry.name)
@@ -310,13 +344,13 @@ fn run_search(cli: SearchArgs) -> Result<()> {
         for src in &sources {
             let mmap = open_archive(&src.path)?;
             let verify_before = cli.verify.then(|| sha256_hex(&mmap));
-            let mut findings = search_with_reporter(&mmap, &re, cli.inspect, &filter)?;
+            let mut findings = search_with_reporter(&mmap, &re, cli.inspect, cli.match_path, &filter)?;
             if multi {
                 for r in &mut findings.records {
                     r.archive = Some(src.label.clone());
                 }
             } else {
-                // --manifest/--pull only apply to a single archive (guarded above).
+                // --manifest/--export only apply to a single archive (guarded above).
                 export_if_requested(&cli, &mmap, &findings)?;
             }
             records.append(&mut findings.records);
@@ -325,7 +359,7 @@ fn run_search(cli: SearchArgs) -> Result<()> {
             }
         }
         emit(cli.output.as_deref(), |w| {
-            write_results(&records, cli.format, colourise, w)
+            write_results(&records, cli.format, colourise, cli.match_path, w)
         })?;
     }
 
@@ -436,6 +470,7 @@ fn search_with_reporter(
     archive: &[u8],
     re: &regex::bytes::Regex,
     deep: bool,
+    match_path: bool,
     filter: &EntryFilter,
 ) -> Result<Findings> {
     let progress = Arc::new(TtyProgress::default());
@@ -451,7 +486,7 @@ fn search_with_reporter(
         None
     };
 
-    let result = search_with_progress(archive, re, deep, filter, progress.as_ref());
+    let result = search_with_progress(archive, re, deep, match_path, filter, progress.as_ref());
 
     stop.store(true, Ordering::Relaxed);
     if let Some(reporter) = reporter {
@@ -494,11 +529,11 @@ fn report_progress(progress: &TtyProgress, stop: &AtomicBool) {
     }
 }
 
-/// Write a manifest and/or pull matched files, if requested.
+/// Write a manifest and/or export matched files, if requested.
 ///
 /// Status goes to stderr so it never pollutes the match results on stdout.
 fn export_if_requested(cli: &SearchArgs, archive: &[u8], findings: &Findings) -> Result<()> {
-    if cli.manifest.is_none() && cli.pull.is_none() {
+    if cli.manifest.is_none() && cli.export.is_none() {
         return Ok(());
     }
 
@@ -518,14 +553,14 @@ fn export_if_requested(cli: &SearchArgs, archive: &[u8], findings: &Findings) ->
         );
     }
 
-    if let Some(dir) = &cli.pull {
-        match export::pull(&plan, archive, &findings.files, dir, cli.max_size)? {
-            PullOutcome::Pulled { files, bytes, .. } => {
-                eprintln!("pulled {files} files ({bytes} bytes) to {}", dir.display());
+    if let Some(dir) = &cli.export {
+        match export::export_files(&plan, archive, &findings.files, dir, cli.max_size)? {
+            ExportOutcome::Exported { files, bytes, .. } => {
+                eprintln!("exported {files} files ({bytes} bytes) to {}", dir.display());
             }
-            PullOutcome::Refused { total_size, cap } => {
+            ExportOutcome::Refused { total_size, cap } => {
                 eprintln!(
-                    "refusing to pull: matched total {total_size} bytes exceeds --max-size {cap}; \
+                    "refusing to export: matched total {total_size} bytes exceeds --max-size {cap}; \
                      nothing written (use the manifest to review)"
                 );
             }

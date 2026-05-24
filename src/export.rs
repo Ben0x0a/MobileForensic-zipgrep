@@ -1,12 +1,12 @@
-//! Export matched files: plan output paths, write a manifest, pull files to disk.
+//! Export matched files: plan output paths, write a manifest, copy files to disk.
 //!
 //! Defines: `ExportItem`/`ExportPlan` (the plan), `plan` (build it),
-//! `write_manifest` (re-ingestable JSON), and `pull` (copy files to a
+//! `write_manifest` (re-ingestable JSON), and `export_files` (copy files to a
 //! directory, honouring a size cap).
 //!
-//! Note on vocabulary: "pull" is the file-copying action (also the `pull`
+//! Note on vocabulary: "export" is the file-copying action (also the `export`
 //! subcommand); "extract" is reserved for extracting *meaning* from a file (the
-//! inspectors). So the functions here are `pull`, not `extract`.
+//! inspectors). So the functions here are `export_*`, not `extract`.
 //! Used by: `main.rs`.
 //! Uses: `crate::engine::MatchedFile`, `crate::models::Method`, `crate::search`
 //! (content), `serde`/`serde_json`, `anyhow`.
@@ -59,9 +59,9 @@ pub struct ExportPlan {
     pub total_size: u64,
 }
 
-/// The result of a pull attempt.
-pub enum PullOutcome {
-    Pulled {
+/// The result of an export attempt.
+pub enum ExportOutcome {
+    Exported {
         files: usize,
         bytes: u64,
         /// Manifest entries whose file was not found in the archive (re-ingest).
@@ -124,32 +124,32 @@ pub fn write_manifest(plan: &ExportPlan, w: &mut dyn Write) -> Result<()> {
     Ok(())
 }
 
-/// Pull the matched files to `dir`.
+/// Export the matched files to `dir`.
 ///
 /// When `max_size` is set and the total exceeds it, nothing is written and
 /// `Refused` is returned — the caller can still have written the manifest, so
 /// the operator can inspect the total and adjust before retrying.
-pub fn pull(
+pub fn export_files(
     plan: &ExportPlan,
     archive: &[u8],
     files: &[MatchedFile],
     dir: &Path,
     max_size: Option<u64>,
-) -> Result<PullOutcome> {
+) -> Result<ExportOutcome> {
     if let Some(cap) = max_size
         && plan.total_size > cap
     {
-        return Ok(PullOutcome::Refused {
+        return Ok(ExportOutcome::Refused {
             total_size: plan.total_size,
             cap,
         });
     }
 
-    // The full entry list lets us also pull each database's SQLite sidecars.
+    // The full entry list lets us also export each database's SQLite sidecars.
     let entries = zip::parse_entries(archive)?;
     let by_path: HashMap<&str, &Entry> = entries.iter().map(|e| (e.name.as_str(), e)).collect();
 
-    let mut pulled = 0usize;
+    let mut exported = 0usize;
     let mut bytes = 0u64;
     for (item, file) in plan.items.iter().zip(files) {
         // Content is read (and decompressed for DEFLATE) once, here.
@@ -160,18 +160,18 @@ pub fn pull(
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
         fs::write(&dest, &content).with_context(|| format!("cannot write {}", dest.display()))?;
-        pulled += 1;
+        exported += 1;
         bytes += content.len() as u64;
 
-        // Sidecars to pull come from the file's inspector (e.g. SQLite's -wal).
+        // Sidecars to export come from the file's inspector (e.g. SQLite's -wal).
         let suffixes = crate::inspect::sidecars_for(&file.entry.name, &content);
-        let (sf, sb) = pull_sidecars(archive, &by_path, &file.entry.name, &dest, suffixes)?;
-        pulled += sf;
+        let (sf, sb) = export_sidecars(archive, &by_path, &file.entry.name, &dest, suffixes)?;
+        exported += sf;
         bytes += sb;
     }
 
-    Ok(PullOutcome::Pulled {
-        files: pulled,
+    Ok(ExportOutcome::Exported {
+        files: exported,
         bytes,
         skipped: 0,
     })
@@ -182,22 +182,22 @@ pub fn read_manifest(reader: impl Read) -> Result<Manifest> {
     serde_json::from_reader(reader).context("failed to parse manifest")
 }
 
-/// Pull the files listed in `manifest` out of `archive` into `dir`, reusing the
-/// manifest's recorded output paths.
+/// Export the files listed in `manifest` out of `archive` into `dir`, reusing
+/// the manifest's recorded output paths.
 ///
 /// This re-ingestion path does not search: it locates each listed file in the
 /// archive by its internal path and copies it to the stored output path. As
-/// with a fresh pull, the size cap is honoured up front.
-pub fn pull_from_manifest(
+/// with a fresh export, the size cap is honoured up front.
+pub fn export_from_manifest(
     manifest: &Manifest,
     archive: &[u8],
     dir: &Path,
     max_size: Option<u64>,
-) -> Result<PullOutcome> {
+) -> Result<ExportOutcome> {
     if let Some(cap) = max_size
         && manifest.total_size > cap
     {
-        return Ok(PullOutcome::Refused {
+        return Ok(ExportOutcome::Refused {
             total_size: manifest.total_size,
             cap,
         });
@@ -225,26 +225,26 @@ pub fn pull_from_manifest(
         bytes += content.len() as u64;
 
         let suffixes = crate::inspect::sidecars_for(&entry.internal_path, &content);
-        let (sf, sb) = pull_sidecars(archive, &by_path, &entry.internal_path, &dest, suffixes)?;
+        let (sf, sb) = export_sidecars(archive, &by_path, &entry.internal_path, &dest, suffixes)?;
         files += sf;
         bytes += sb;
     }
 
-    Ok(PullOutcome::Pulled {
+    Ok(ExportOutcome::Exported {
         files,
         bytes,
         skipped,
     })
 }
 
-/// Pull a file's declared sidecars into the same folder as `main_dest` (e.g.
+/// Export a file's declared sidecars into the same folder as `main_dest` (e.g.
 /// `sms.db` → `sms.db-wal`), returning (count, bytes).
 ///
 /// The `suffixes` come from the file's inspector (see
 /// [`crate::inspect::sidecars_for`]); each one names a sibling entry to fetch if
 /// present. For SQLite this keeps the exported database complete — uncommitted
 /// rows live in the `-wal`.
-fn pull_sidecars(
+fn export_sidecars(
     archive: &[u8],
     by_path: &HashMap<&str, &Entry>,
     internal_path: &str,

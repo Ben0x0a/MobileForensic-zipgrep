@@ -58,22 +58,25 @@ impl FromStr for OutputFormat {
 /// Write all `records` to `w` in `format`.
 ///
 /// `colourise` applies only to the txt format; JSON/CSV are machine-readable
-/// and never receive ANSI escapes.
+/// and never receive ANSI escapes. `path_match` selects the `--match-path`
+/// rendering, where each record is a file matched by its path: txt then prints
+/// just the (highlighted) path, with no in-file offset or duplicated line.
 pub fn write_results(
     records: &[MatchRecord],
     format: OutputFormat,
     colourise: bool,
+    path_match: bool,
     w: &mut dyn Write,
 ) -> Result<()> {
     match format {
-        OutputFormat::Txt => write_txt(records, colourise, w),
+        OutputFormat::Txt => write_txt(records, colourise, path_match, w),
         OutputFormat::Json => write_json(records, w),
         OutputFormat::Csv => write_csv(records, w),
     }
 }
 
 // The matched line is shown only when it looks textual; for binary files the
-// exact bytes remain recoverable from the offsets (and via the pull step), so a
+// exact bytes remain recoverable from the offsets (and via the export step), so a
 // display-oriented format never raw-dumps binary content.
 
 /// Heuristic: does this line look like text rather than binary?
@@ -167,8 +170,25 @@ impl<'a> From<&'a MatchRecord> for CsvView<'a> {
 ///
 /// The offset is hex (`0x…`) to match how analysts read a hex editor. Binary
 /// files contribute only `path:0x<offset>` — their bytes are never dumped.
-fn write_txt(records: &[MatchRecord], colourise: bool, w: &mut dyn Write) -> Result<()> {
+fn write_txt(
+    records: &[MatchRecord],
+    colourise: bool,
+    path_match: bool,
+    w: &mut dyn Write,
+) -> Result<()> {
     for r in records {
+        // --match-path: the "match" is the file's path itself, so print just the
+        // path (the source archive joined like a folder), highlighting the part
+        // the pattern matched. No in-file offset — there is no content position.
+        if path_match {
+            let out = match &r.archive {
+                Some(a) => format!("{a}/{}", render_line(r, colourise)),
+                None => render_line(r, colourise),
+            };
+            writeln!(w, "{out}").context("failed writing txt output")?;
+            continue;
+        }
+
         // The source archive (when set) joins the internal path like a folder,
         // so a match reads as `case.zip/internal/file:0x<off>`.
         let mut out = match &r.archive {

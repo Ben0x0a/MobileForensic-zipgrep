@@ -1,35 +1,46 @@
 //! Entry filtering: decide which archive entries are worth searching.
 //!
-//! Defines: `EntryFilter`, combining include globs (`--path`), exclude globs
-//! (`--not-path`), and a skip-media switch into one `selects(path)` predicate.
-//! Used by: `engine` (skips entries before searching) and `main` (builds it from
-//! the CLI flags).
-//! Uses: only the standard library.
+//! Defines: `EntryFilter`, which combines include globs (`--path`), exclude
+//! globs (`--not-path`), a file-type allowlist (`--type`), and the media skip.
+//! It splits into two predicates: `selects(path)` (path-only, applied before
+//! reading any bytes) and `accepts_type(TypeInfo)` (applied after detecting the
+//! format from the content header).
+//! Used by: `engine` (skips entries before/while searching) and `main` (builds
+//! it from the CLI flags).
+//! Uses: `crate::inspect::TypeInfo` (the detected format/category).
 //!
 //! Wildcards: `*` matches any run of characters *including* `/`, and `?` matches
 //! exactly one character — the intuitive rule for forensic filtering (`*.db`
 //! matches a `.db` file at any depth). Matching is case-sensitive.
 //!
 //! Media skip: phone acquisitions are dominated (often ~80%) by photos and
-//! videos, which contain no searchable text, so media files are skipped by
-//! default for speed; `--include-media` searches them anyway.
+//! videos, which contain no searchable text, so files whose detected category is
+//! `media` are skipped by default for speed; `--include-media` searches them.
+//! The skip is just the `--type` machinery applied to the `media` category, so
+//! detection lives in one place (the inspectors), not a duplicated extension list.
 
-/// Which entries to search: include/exclude globs plus a media skip.
+use crate::inspect::TypeInfo;
+
+/// Which entries to search: path include/exclude globs, a `--type` allowlist,
+/// and the media skip.
 pub struct EntryFilter {
     /// `--path` globs; empty means "every entry" (subject to the rules below).
     include: Vec<String>,
     /// `--not-path` globs; an entry matching any of these is skipped.
     exclude: Vec<String>,
-    /// Skip image/video/audio files (recognised by extension).
+    /// `--type` values (format names or categories); empty means "any type".
+    types: Vec<String>,
+    /// Skip files whose detected category is `media` (when no `--type` is set).
     skip_media: bool,
 }
 
 impl EntryFilter {
     /// Build a filter from the CLI flags.
-    pub fn new(include: &[String], exclude: &[String], skip_media: bool) -> Self {
+    pub fn new(include: &[String], exclude: &[String], types: &[String], skip_media: bool) -> Self {
         Self {
             include: include.to_vec(),
             exclude: exclude.to_vec(),
+            types: types.to_vec(),
             skip_media,
         }
     }
@@ -39,15 +50,16 @@ impl EntryFilter {
         Self {
             include: Vec::new(),
             exclude: Vec::new(),
+            types: Vec::new(),
             skip_media: false,
         }
     }
 
-    /// Whether `path` should be searched.
+    /// Whether `path` passes the path-only filters (include/exclude globs).
     ///
-    /// An entry is searched when it matches an include glob (or none were
-    /// given), matches no exclude glob, and — unless media is being searched —
-    /// is not a media file.
+    /// This runs before any content is read; the type/media decision is made
+    /// separately by [`accepts_type`](Self::accepts_type) once the header has
+    /// been inspected.
     pub fn selects(&self, path: &str) -> bool {
         if !self.include.is_empty() && !self.include.iter().any(|g| matches(g, path)) {
             return false;
@@ -55,31 +67,32 @@ impl EntryFilter {
         if self.exclude.iter().any(|g| matches(g, path)) {
             return false;
         }
-        if self.skip_media && is_media(path) {
+        true
+    }
+
+    /// Whether an entry of the detected type should be searched.
+    ///
+    /// `info` is the format/category from `inspect::detect_type` (header-first,
+    /// then extension), or `None` when no inspector claims the file.
+    ///
+    /// - With `--type`: keep only files whose format name **or** category is in
+    ///   the allowlist (an unrecognised file, `None`, is excluded). The explicit
+    ///   allowlist takes over, so the media skip does not also apply.
+    /// - Without `--type`: keep everything, except — when `skip_media` is set —
+    ///   files whose category is `media`.
+    pub fn accepts_type(&self, info: Option<TypeInfo>) -> bool {
+        if !self.types.is_empty() {
+            return info.is_some_and(|i| {
+                self.types
+                    .iter()
+                    .any(|t| t.as_str() == i.name || t.as_str() == i.category)
+            });
+        }
+        if self.skip_media && info.is_some_and(|i| i.category == "media") {
             return false;
         }
         true
     }
-}
-
-/// True if `path`'s extension is a known image/video/audio type.
-fn is_media(path: &str) -> bool {
-    let base = path.rsplit('/').next().unwrap_or(path);
-    let ext = base.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
-    matches!(
-        ext.as_deref(),
-        Some(
-            // images
-            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "tif" | "tiff" | "heic" | "heif" | "webp"
-            | "ico" | "dng" | "cr2" | "nef"
-            // video
-            | "mp4" | "mov" | "m4v" | "avi" | "mkv" | "webm" | "3gp" | "3g2" | "mpg" | "mpeg"
-            | "wmv" | "flv"
-            // audio
-            | "mp3" | "m4a" | "aac" | "wav" | "flac" | "ogg" | "oga" | "opus" | "wma" | "amr"
-            | "caf" | "aiff"
-        )
-    )
 }
 
 /// True if `path` matches the `*`/`?` wildcard `pattern`.
@@ -137,46 +150,72 @@ mod tests {
         assert!(!wildcard_match(b"?at", b"at"));
     }
 
+    fn media() -> Option<TypeInfo> {
+        Some(TypeInfo {
+            name: "jpeg",
+            category: "media",
+        })
+    }
+    fn sqlite() -> Option<TypeInfo> {
+        Some(TypeInfo {
+            name: "sqlite",
+            category: "database",
+        })
+    }
+
     #[test]
     fn all_selects_everything() {
         let f = EntryFilter::all();
         assert!(f.selects("any/path.txt"));
-        assert!(f.selects("photo.jpg")); // media not skipped by `all`
+        assert!(f.selects("photo.jpg")); // selects() is path-only
+        assert!(f.accepts_type(media())); // and `all` keeps media too
     }
 
     #[test]
     fn include_restricts_to_matching() {
-        let f = EntryFilter::new(&["*.db".into()], &[], false);
+        let f = EntryFilter::new(&["*.db".into()], &[], &[], false);
         assert!(f.selects("a/x.db"));
         assert!(!f.selects("a/x.txt"));
     }
 
     #[test]
     fn exclude_rejects_matching() {
-        let f = EntryFilter::new(&[], &["*/Caches/*".into()], false);
+        let f = EntryFilter::new(&[], &["*/Caches/*".into()], &[], false);
         assert!(f.selects("a/Documents/x.db"));
         assert!(!f.selects("a/Caches/x.db"));
     }
 
     #[test]
     fn exclude_wins_over_include() {
-        let f = EntryFilter::new(&["*.db".into()], &["*/Caches/*".into()], false);
+        let f = EntryFilter::new(&["*.db".into()], &["*/Caches/*".into()], &[], false);
         assert!(!f.selects("a/Caches/x.db"));
     }
 
     #[test]
-    fn skip_media_drops_images_and_video() {
-        let f = EntryFilter::new(&[], &[], true);
-        assert!(!f.selects("DCIM/IMG_0001.JPG")); // case-insensitive extension
-        assert!(!f.selects("clip.mp4"));
-        assert!(!f.selects("song.mp3"));
-        assert!(f.selects("notes.txt"));
-        assert!(f.selects("db.sqlite"));
+    fn skip_media_drops_media_category() {
+        let f = EntryFilter::new(&[], &[], &[], true);
+        assert!(!f.accepts_type(media())); // image/video/audio dropped
+        assert!(f.accepts_type(sqlite())); // non-media kept
+        assert!(f.accepts_type(None)); // unrecognised type still searched
     }
 
     #[test]
-    fn include_media_keeps_them() {
-        let f = EntryFilter::new(&[], &[], false);
-        assert!(f.selects("DCIM/IMG_0001.jpg"));
+    fn include_media_keeps_media() {
+        let f = EntryFilter::new(&[], &[], &[], false); // skip_media off
+        assert!(f.accepts_type(media()));
+    }
+
+    #[test]
+    fn type_allowlist_matches_name_or_category() {
+        let by_name = EntryFilter::new(&[], &[], &["sqlite".into()], true);
+        assert!(by_name.accepts_type(sqlite()));
+        assert!(!by_name.accepts_type(media()));
+        assert!(!by_name.accepts_type(None));
+
+        // A category value selects the whole family; it also overrides the media
+        // skip, so `--type media` keeps media even though skip_media is set.
+        let by_category = EntryFilter::new(&[], &[], &["media".into()], true);
+        assert!(by_category.accepts_type(media()));
+        assert!(!by_category.accepts_type(sqlite()));
     }
 }
