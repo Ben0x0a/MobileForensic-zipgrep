@@ -46,7 +46,7 @@ cargo build --release
 ## Quick start
 
 ```
-# Find a string and show where it is (path : offset-in-file : offset-in-zip : line)
+# Find a string and show where it is (path:0x<offset-in-file>:line)
 mf-zipgrep search 'secret' case.zip
 
 # Case-insensitive, literal (not a regex)
@@ -71,21 +71,30 @@ mf-zipgrep has two subcommands:
 
 | Command | Purpose |
 |---|---|
-| `search PATTERN ARCHIVE` | Search the archive; print/record matches; optionally pull files. |
+| `search PATTERN ARCHIVE...` | Search one or more archives (or directories, with `-r`); print/record matches; optionally pull files. |
 | `pull ARCHIVE --from-manifest FILE --to DIR` | Re-ingest a manifest and copy the listed files out (no search). |
 
 ### `search`
 
 ```
-mf-zipgrep search PATTERN ARCHIVE [options]
+mf-zipgrep search PATTERN ARCHIVE... [options]
 ```
+
+Grep-style: the **PATTERN comes first**, then the archives. `ARCHIVE` may be
+repeated, and with `-r` a directory argument is searched recursively for its
+`*.zip` files. With more than one archive, each result is tagged with its source
+(see [Output](#output)). `--pull`/`--manifest` require a single archive.
 
 | Flag | Meaning |
 |---|---|
 | `-i`, `--ignore-case` | Case-insensitive matching. |
 | `-F`, `--fixed-strings` | Treat PATTERN as a literal string, not a regex. |
 | `-E`, `--extended-regexp` | Accepted for grep muscle memory; no-op (the engine is already ERE-like). |
+| `-r`, `--recursive` | Search directory arguments recursively for `*.zip` files. |
 | `--path GLOB` | Only search files whose internal path matches the wildcard. Repeatable. |
+| `--not-path GLOB` | Skip files matching the wildcard (takes precedence over `--path`). Repeatable. |
+| `--include-media` | Search image/video/audio files too (skipped by default — see below). |
+| `--fast` | Speed preset: skip media + all cores + a customisable exclude list (`src/fast.rs`). |
 | `--inspect` | Resolve matches inside recognised formats (see [Inspection](#deep-inspection)). |
 | `-c`, `--count` | Print only the match count per file (one line per file). |
 | `--format txt\|json\|csv` | Output format (default `txt`). |
@@ -95,6 +104,7 @@ mf-zipgrep search PATTERN ARCHIVE [options]
 | `--manifest FILE` | Write a re-ingestable manifest of matched files (+ total size). |
 | `--pull DIR` | Also copy matched files out, in one step. |
 | `--max-size SIZE` | Refuse to pull if the matched total exceeds SIZE (e.g. `200MB`, `1G`). |
+| `--verify` | SHA-256 the archive before and after the run; report whether it changed (integrity attestation). |
 
 ### `pull`
 
@@ -144,8 +154,8 @@ Every match answers "where", completely:
 | `archive_offset` | The match's **absolute** byte position in the archive (`= file_start + file_offset` for STORED). |
 
 For **DEFLATE** entries the match lives in the decompressed stream, which has no
-single archive byte, so `archive_offset` is the compressed blob's start (shown as
-`~N` in txt, and `compressed: true` in json/csv).
+single archive byte, so `archive_offset` (in json/csv) is the compressed blob's
+start, flagged `compressed: true`. txt shows only the in-file offset.
 
 ---
 
@@ -182,12 +192,16 @@ for planned formats (ABX, SEGB).
 ## Forensic notes
 
 - The archive is opened **read-only** and memory-mapped; mf-zipgrep never writes
-  to it.
+  to it. `--verify` adds a SHA-256 attestation (hash before & after the run) for
+  chain-of-custody — the hash matches the system `shasum -a 256`.
 - Offsets are **byte-accurate** for STORED entries (verifiable with `dd`/a hex
   editor).
 - Long "lines" in binary files are capped to a window around the match for
   display; the reported offsets are exact regardless.
-- Search is case-sensitive unless `-i`; `--path` matching is case-sensitive.
+- Search is case-sensitive unless `-i`; `--path`/`--not-path` matching is case-sensitive.
+- **Media files (images/video/audio) are skipped by default** — they hold no
+  searchable text and dominate acquisition size. Use `--include-media` to search
+  them (e.g. to scan for text embedded in a file mislabelled as media).
 
 ---
 
