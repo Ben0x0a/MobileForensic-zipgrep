@@ -18,8 +18,32 @@ use serde_json::json;
 
 use crate::models::Inspection;
 
+/// plist inspector — Apple property lists, both binary (`bplist00`) and XML.
+pub struct Plist;
+
+impl super::Inspector for Plist {
+    fn extensions(&self) -> &'static [&'static str] {
+        &["plist"]
+    }
+    fn detect(&self, content: &[u8]) -> bool {
+        if content.starts_with(b"bplist00") {
+            return true;
+        }
+        // An XML plist: an XML declaration whose head names the plist DTD/root.
+        // (Checked before the generic XML inspector in the registry.)
+        if super::looks_like_xml(content) {
+            let head = &content[..content.len().min(512)];
+            return super::contains(head, b"<plist") || super::contains(head, b"DOCTYPE plist");
+        }
+        false
+    }
+    fn inspect(&self, content: &[u8], offset: usize) -> Option<Inspection> {
+        resolve(content, offset)
+    }
+}
+
 /// Dispatch to the binary or XML plist parser by signature.
-pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
+fn resolve(content: &[u8], offset: usize) -> Option<Inspection> {
     if content.starts_with(b"bplist00") {
         inspect_binary(content, offset)
     } else {

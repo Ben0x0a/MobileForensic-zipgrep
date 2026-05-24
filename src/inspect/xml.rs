@@ -18,8 +18,24 @@ use serde_json::json;
 
 use crate::models::Inspection;
 
+/// XML inspector — generic XML (an Apple plist is handled by the plist
+/// inspector, which is checked first).
+pub struct Xml;
+
+impl super::Inspector for Xml {
+    fn extensions(&self) -> &'static [&'static str] {
+        &["xml"]
+    }
+    fn detect(&self, content: &[u8]) -> bool {
+        super::looks_like_xml(content)
+    }
+    fn inspect(&self, content: &[u8], offset: usize) -> Option<Inspection> {
+        resolve(content, offset)
+    }
+}
+
 /// Locate the element path of the content at `offset`.
-pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
+fn resolve(content: &[u8], offset: usize) -> Option<Inspection> {
     let mut reader = Reader::from_reader(content);
     // Locate, don't validate: tolerate mismatched/!unclosed tags in evidence.
     reader.config_mut().check_end_names = false;

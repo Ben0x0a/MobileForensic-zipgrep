@@ -49,8 +49,27 @@ struct Cell {
     columns: Vec<Col>,
 }
 
+/// SQLite inspector — recognised by the `SQLite format 3\0` header.
+pub struct Sqlite;
+
+impl super::Inspector for Sqlite {
+    fn extensions(&self) -> &'static [&'static str] {
+        &["sqlite", "sqlite3", "db", "sqlitedb"]
+    }
+    fn detect(&self, content: &[u8]) -> bool {
+        content.starts_with(b"SQLite format 3\x00")
+    }
+    fn inspect(&self, content: &[u8], offset: usize) -> Option<Inspection> {
+        locate(content, offset)
+    }
+    fn sidecars(&self) -> &'static [&'static str] {
+        // Uncommitted rows live in the WAL; pull these so the DB opens complete.
+        &["-wal", "-shm", "-journal"]
+    }
+}
+
 /// Resolve `offset` to a table cell, or fall back to page + offset-in-page.
-pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
+fn locate(content: &[u8], offset: usize) -> Option<Inspection> {
     let db = parse_header(content)?;
     if offset >= content.len() {
         return None;

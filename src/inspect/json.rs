@@ -22,8 +22,23 @@ enum Seg {
     Index(usize),
 }
 
+/// JSON inspector — detected by `.json` extension (JSON has no header magic).
+pub struct Json;
+
+impl super::Inspector for Json {
+    fn extensions(&self) -> &'static [&'static str] {
+        &["json"]
+    }
+    fn detect(&self, _content: &[u8]) -> bool {
+        false // no signature
+    }
+    fn inspect(&self, content: &[u8], offset: usize) -> Option<Inspection> {
+        resolve(content, offset)
+    }
+}
+
 /// Locate the JSON path of the value/key at `offset`.
-pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
+fn resolve(content: &[u8], offset: usize) -> Option<Inspection> {
     if offset >= content.len() {
         return None;
     }

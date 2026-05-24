@@ -14,8 +14,23 @@ use serde_json::json;
 
 use crate::models::Inspection;
 
+/// CSV inspector — detected by `.csv` extension (CSV has no header magic).
+pub struct Csv;
+
+impl super::Inspector for Csv {
+    fn extensions(&self) -> &'static [&'static str] {
+        &["csv"]
+    }
+    fn detect(&self, _content: &[u8]) -> bool {
+        false // no signature
+    }
+    fn inspect(&self, content: &[u8], offset: usize) -> Option<Inspection> {
+        resolve(content, offset)
+    }
+}
+
 /// Locate the row/column of the match at `offset` in a CSV document.
-pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
+fn resolve(content: &[u8], offset: usize) -> Option<Inspection> {
     if offset >= content.len() {
         return None;
     }

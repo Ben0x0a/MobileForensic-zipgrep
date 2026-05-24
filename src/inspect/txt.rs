@@ -12,8 +12,23 @@ use serde_json::json;
 
 use crate::models::Inspection;
 
+/// TXT inspector — plain text / log files (no header; detected by extension).
+pub struct Txt;
+
+impl super::Inspector for Txt {
+    fn extensions(&self) -> &'static [&'static str] {
+        &["txt", "log", "text"]
+    }
+    fn detect(&self, _content: &[u8]) -> bool {
+        false // no signature
+    }
+    fn inspect(&self, content: &[u8], offset: usize) -> Option<Inspection> {
+        resolve(content, offset)
+    }
+}
+
 /// Report the 1-based line and byte-column of `offset` within `content`.
-pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection> {
+fn resolve(content: &[u8], offset: usize) -> Option<Inspection> {
     // An offset past the end means the caller passed a position from a
     // different buffer; refuse rather than report a bogus location.
     if offset > content.len() {

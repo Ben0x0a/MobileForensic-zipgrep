@@ -65,16 +65,45 @@ Parses the database header (page size), then the b-tree:
 This split is intentional: forensically, "which page/offset" is still useful when
 a byte isn't part of a current row (e.g. a deleted record in free space).
 
-## Adding an inspector
+## The inspector API
 
-1. Create `src/inspect/<format>.rs` exposing
-   `pub fn inspect(content: &[u8], offset: usize) -> Option<Inspection>`.
-2. Add a `Format` variant and a dispatch arm in `src/inspect/mod.rs`.
-3. Add detection in `detect_by_magic` (preferred) and/or `detect_by_extension`.
-4. Add a test, ideally against a committed real fixture in `tests/fixtures/`.
+Every format is an `Inspector` (the trait in `src/inspect/mod.rs`):
 
-`Inspection { format, summary, detail }` carries a human one-liner (`summary`,
-used by txt/csv) and a structured `serde_json::Value` (`detail`, used by json).
+```rust
+pub trait Inspector: Sync {
+    fn extensions(&self) -> &'static [&'static str]; // fallback detection
+    fn detect(&self, content: &[u8]) -> bool;        // header/magic (preferred)
+    fn inspect(&self, content: &[u8], offset: usize) -> Option<Inspection>;
+    fn sidecars(&self) -> &'static [&'static str] { &[] } // associated files
+}
+```
+
+Inspectors are zero-sized types listed once in `INSPECTORS`. The shared core —
+detection order (header-first, then extension), dispatch, and output — lives in
+`mod.rs`; an inspector only supplies its format specifics. The per-match
+`Inspection { format, summary, detail }` carries the short `format` tag, the
+labelled human one-liner (`summary`, used by the txt tag and csv `context`), and
+the structured `serde_json::Value` (`detail`, used by json). Shared helpers
+(`line_at`, `looks_like_xml`, `contains`) live in `mod.rs` and are documented so
+inspectors reuse rather than duplicate them.
+
+### Adding one
+
+1. Copy [`inspector-template.rs`](inspector-template.rs) to
+   `src/inspect/<format>.rs` and `mod <format>;` it in `src/inspect/mod.rs`.
+2. Fill in `extensions` / `detect` / `inspect` (and `sidecars` if any).
+3. Register it: add `&<format>::Foo` to `INSPECTORS` in `src/inspect/mod.rs` —
+   **list more specific formats first**, because `detect` (header) checks run in
+   order (e.g. plist before generic XML).
+4. Reuse shared helpers; add new ones to `mod.rs` with a doc comment.
+5. Add a test, ideally against a committed fixture in `tests/fixtures/`.
+
+### Sidecars (associated files)
+
+A format declares the files pulled alongside a match via `sidecars()` — suffixes
+appended to the file name, e.g. SQLite returns `["-wal", "-shm", "-journal"]`.
+`pull` fetches them automatically (`inspect::sidecars_for`), so adding a format's
+sidecars is one line in its inspector — `export.rs` needs no change.
 
 ## Planned
 
