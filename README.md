@@ -22,9 +22,15 @@ private/var/.../CellularUsage.db:0x1f4a:...IMSI 208...
 - **STORED + DEFLATE**: uncompressed entries are searched in place; DEFLATE
   entries are decompressed on demand.
 - **Deep inspection** (`--inspect`): for recognised formats, resolves a match to
-  a meaningful location — a SQLite `table/rowid/column`, a JSON/plist key path,
-  an XML element path, a CSV row/column, …
-- **Pull matched files out** with a re-ingestable manifest and a size cap.
+  a meaningful location — a SQLite `table/column [TYPE]/rowid` (plus the embedded
+  format when the cell is a BLOB), a JSON/plist key path, an XML element path, a
+  CSV row/column, …
+- **Filter by file type** (`--type`): keep only a format or a whole category
+  (e.g. `--type sqlite`, `--type media`), recognised by content **header first**,
+  then extension — the same detection the inspectors use.
+- **Find files by path** (`--match-path`): apply the pattern to each file's
+  internal **path** instead of its content — list every file whose path matches.
+- **Export matched files out** with a re-ingestable manifest and a size cap.
 - **Multi-threaded**, with a live progress hint on a terminal.
 
 > Status: **v1**. Some inspectors (ABX, SEGB) are still planned — see
@@ -55,12 +61,18 @@ mf-zipgrep search -i -F 'O2 UK' case.zip
 # Restrict to certain files, and resolve matches inside them
 mf-zipgrep search 'token' case.zip --path '*.sqlite' --path '*.plist' --inspect
 
+# Only search databases (detected by header, not just extension)
+mf-zipgrep search 'token' case.zip --type database --inspect
+
+# List every file whose path contains "banking" (no content searched)
+mf-zipgrep search 'banking' case.zip --match-path
+
 # Machine-readable output to a file
 mf-zipgrep search 'token' case.zip --format json -o hits.json
 
-# Record matched files (with total size), review, then pull them out
+# Record matched files (with total size), review, then export them out
 mf-zipgrep search 'token' case.zip --manifest hits.json
-mf-zipgrep pull case.zip --from-manifest hits.json --to ./pulled --max-size 500MB
+mf-zipgrep export case.zip --from-manifest hits.json --to ./exported --max-size 500MB
 ```
 
 ---
@@ -71,8 +83,8 @@ mf-zipgrep has two subcommands:
 
 | Command | Purpose |
 |---|---|
-| `search PATTERN ARCHIVE...` | Search one or more archives (or directories, with `-r`); print/record matches; optionally pull files. |
-| `pull ARCHIVE --from-manifest FILE --to DIR` | Re-ingest a manifest and copy the listed files out (no search). |
+| `search PATTERN ARCHIVE...` | Search one or more archives (or directories, with `-r`); print/record matches; optionally export files. |
+| `export ARCHIVE --from-manifest FILE --to DIR` | Re-ingest a manifest and copy the listed files out (no search). |
 
 ### `search`
 
@@ -83,7 +95,7 @@ mf-zipgrep search PATTERN ARCHIVE... [options]
 Grep-style: the **PATTERN comes first**, then the archives. `ARCHIVE` may be
 repeated, and with `-r` a directory argument is searched recursively for its
 `*.zip` files. With more than one archive, each result is tagged with its source
-(see [Output](#output)). `--pull`/`--manifest` require a single archive.
+(see [Output](#output)). `--export`/`--manifest` require a single archive.
 
 | Flag | Meaning |
 |---|---|
@@ -93,6 +105,8 @@ repeated, and with `-r` a directory argument is searched recursively for its
 | `-r`, `--recursive` | Search directory arguments recursively for `*.zip` files. |
 | `--path GLOB` | Only search files whose internal path matches the wildcard. Repeatable. |
 | `--not-path GLOB` | Skip files matching the wildcard (takes precedence over `--path`). Repeatable. |
+| `--type TYPE` | Only search files of a format (`sqlite`, `jpeg`, …) or category (`media`, `database`, `structured`, `text`). Header-first, then extension. Repeatable. |
+| `--match-path` | Match the PATTERN against each file's internal path instead of its content; list the files whose path matches (no content is read). |
 | `--include-media` | Search image/video/audio files too (skipped by default — see below). |
 | `--fast` | Speed preset: skip media + all cores + a customisable exclude list (`src/fast.rs`). |
 | `--inspect` | Resolve matches inside recognised formats (see [Inspection](#deep-inspection)). |
@@ -102,20 +116,20 @@ repeated, and with `-r` a directory argument is searched recursively for its
 | `--colour[=auto\|always\|never]` | Highlight matches (txt to a terminal). `--color` also accepted. |
 | `-j`, `--threads N` | Search threads (default: one per CPU core). |
 | `--manifest FILE` | Write a re-ingestable manifest of matched files (+ total size). |
-| `--pull DIR` | Also copy matched files out, in one step. |
-| `--max-size SIZE` | Refuse to pull if the matched total exceeds SIZE (e.g. `200MB`, `1G`). |
+| `--export DIR` | Also copy matched files out, in one step. |
+| `--max-size SIZE` | Refuse to export if the matched total exceeds SIZE (e.g. `200MB`, `1G`). |
 | `--verify` | SHA-256 the archive before and after the run; report whether it changed (integrity attestation). |
 
-### `pull`
+### `export`
 
 ```
-mf-zipgrep pull ARCHIVE --from-manifest FILE --to DIR [--max-size SIZE]
+mf-zipgrep export ARCHIVE --from-manifest FILE --to DIR [--max-size SIZE]
 ```
 
 Re-ingests a manifest written by `search --manifest` and copies the listed files
 out of the archive — **without searching again**. Honours `--max-size`.
 
-> **Vocabulary:** *pull* = copy files out of the archive; *extract* is reserved
+> **Vocabulary:** *export* = copy files out of the archive; *extract* is reserved
 > for extracting *meaning* (the `--inspect` analysis).
 
 ---
@@ -172,7 +186,11 @@ It appends `[format summary]` in txt, and a nested `context` object in json.
 | XML | element path + line, e.g. `/plist/dict/string` |
 | CSV | row, column, and header name |
 | plist (XML & binary `bplist`) | dict-key / array-index path, e.g. `$.Account.Servers[1]` |
-| SQLite | `table`, `column`, `row`, and the **decoded cell value** for live rows; otherwise `page` + offset-in-page |
+| SQLite | `table`, `column [TYPE]`, `row`, and the **decoded cell value** for live rows; otherwise `page` + offset-in-page |
+
+For a SQLite **BLOB** cell, the blob's own signature is checked and, if it is a
+recognised format (e.g. an embedded `bplist`), that inspector resolves it too —
+so a match reads `column: payload [BLOB] … blob: bplist  key: $.Account.Servers`.
 
 See [docs/inspectors.md](docs/inspectors.md) for details and [docs/roadmap.md](docs/roadmap.md)
 for planned formats (ABX, SEGB).
