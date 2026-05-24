@@ -12,12 +12,13 @@ src/
   zip.rs        ZIP central-directory parser (STORED + DEFLATE, ZIP64)
   search.rs     per-entry byte search (regex::bytes) + DEFLATE inflate + line preview
   engine.rs     orchestration: parse + parallel search -> Findings; Progress trait
-  filter.rs     PathFilter: --path wildcard matching
+  filter.rs     EntryFilter: include/exclude globs (--path/--not-path) + skip-media
+  fast.rs       the --fast preset's customisable exclude list
   inspect/      deep "what does this match mean" inspectors
-    mod.rs        format detection (header-first) + dispatch
+    mod.rs        Inspector trait + registry + detection (header-first) + dispatch
     txt.rs json.rs xml.rs csv.rs plist.rs sqlite.rs
   output.rs     format match records to txt / json / csv
-  export.rs     plan output paths, write manifest, pull files to disk
+  export.rs     plan output paths, write manifest, pull files (+ sidecars) to disk
 ```
 
 ## Data flow
@@ -29,7 +30,7 @@ archive bytes (mmap)
  zip::parse_entries ──► Vec<Entry>            (central-directory walk, ZIP64)
       │
       ▼
- filter (PathFilter)  ──► entries to search
+ filter (EntryFilter) ──► entries to search  (--path/--not-path, skip-media)
       │
       ▼  (rayon, in parallel, per entry)
  search::entry_content ─► STORED: borrow mmap slice
@@ -70,9 +71,13 @@ So printing matches and pulling files never re-scan the archive.
 - **Library has no UI.** `engine::Progress` is a trait the engine calls; the
   terminal reporter lives in `main`. `output::OutputFormat` parses via `FromStr`,
   not clap's `ValueEnum`, so the core never depends on the CLI framework.
-- **Inspectors are pluggable.** `inspect/mod.rs` detects the format (content
-  magic first, extension fallback) and dispatches to a self-contained submodule.
-  Adding a format is a new submodule plus one match arm.
+- **Inspectors are a small API.** Each format is an `Inspector` (trait in
+  `inspect/mod.rs`): `extensions`, `detect` (header), `inspect` (resolve), and
+  optional `sidecars`. The shared core (header-first detection,
+  dispatch, output) lives in `mod.rs`; adding a format is a new submodule
+  implementing the trait plus one line in the `INSPECTORS` registry. A format's
+  associated files (e.g. SQLite's `-wal`) are declared by its `sidecars()`, which
+  `export` pulls automatically. See `docs/inspectors.md` + `inspector-template.rs`.
 - **Errors, not panics.** All parsing uses bounds-checked reads that return
   `Result`; anything an inspector can't resolve degrades gracefully (e.g. SQLite
   falls back to `page + offset`) rather than erroring — forensic inputs are
@@ -99,4 +104,4 @@ byte** (`tests/common`) so they are deterministic and need no external `zip`
 tool. Binary-format inspectors are tested against committed real fixtures
 (`tests/fixtures/`: a SQLite DB from `sqlite3`, a plist + bplist from `plutil`).
 
-`cargo test` runs ~60 tests; `cargo clippy --all-targets -- -D warnings` is clean.
+`cargo test` runs 70+ tests; `cargo clippy --all-targets -- -D warnings` is clean.

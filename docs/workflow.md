@@ -32,7 +32,16 @@ mf-zipgrep search 'token' acquisition.zip --path '*.sqlite' --path '*.plist'
 mf-zipgrep search 'hello' acquisition.zip --path '*/Messages/*'
 ```
 
-Filtering happens before the search, so it also scopes what gets pulled.
+Exclude with `--not-path` (takes precedence over `--path`):
+
+```
+mf-zipgrep search 'token' acquisition.zip --not-path '*Caches*' --not-path '*.log'
+```
+
+**Media files (images/video/audio) are skipped by default** — they contain no
+searchable text and are most of an acquisition's size. Pass `--include-media` to
+search them anyway. Filtering happens before the search, so it also scopes what
+gets pulled.
 
 ## 3. Understand a match (deep inspection)
 
@@ -88,7 +97,23 @@ If you don't need the review step:
 mf-zipgrep search 'private_key' acquisition.zip --pull ./pulled --max-size 1G --manifest hits.json
 ```
 
-## 6. Output layout of pulled files
+## 6. Search several archives at once
+
+List several archives after the PATTERN, or point `-r` at a directory to search
+every `*.zip` under it:
+
+```
+mf-zipgrep search 'IMSI' case-a.zip case-b.zip
+mf-zipgrep search -r 'IMSI' ./acquisitions/
+```
+
+With more than one archive each result is tagged with its source: in txt the
+archive joins the path like a folder (`case-a.zip/private/.../sms.db:0x..`); under
+`-r` the archive is shown **relative to the directory** (`sub/case-b.zip/...`).
+json/csv carry it as an `archive` field/column. A single archive is untagged.
+`--pull`/`--manifest` require a single archive.
+
+## 7. Output layout of pulled files
 
 Each matched file is written to:
 
@@ -110,6 +135,16 @@ Example:
 pulled/
   sms.db_a3f2c1d0e5/sms.db
   Info.plist_7b1c9e4f02/Info.plist
+```
+
+When a matched file is a SQLite database, its **sidecars** (`-wal`, `-shm`,
+`-journal`) are pulled into the same folder if present in the archive — so the
+database opens complete (uncommitted rows live in the WAL):
+
+```
+pulled/
+  sms.db_a3f2c1d0e5/sms.db
+  sms.db_a3f2c1d0e5/sms.db-wal
 ```
 
 ## Notes

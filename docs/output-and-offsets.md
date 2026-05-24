@@ -31,6 +31,11 @@ raw-dumped. The matched line is shown only when it looks **textual**; binary
 files (SQLite, bplist, …) contribute location only. Per-format context is opt-in
 via `--inspect`.
 
+**Multiple archives:** when more than one archive is searched in a run, each
+result is tagged with its source archive — a `archive:` prefix in txt, an
+`archive` field in json, and the leading `archive` column in csv. With a single
+archive there is no tag (json omits the field; the csv column is empty).
+
 ## txt
 
 One line per match:
@@ -86,12 +91,12 @@ content.
 A header row plus one row per match. Columns are fixed (so the set never varies):
 
 ```
-path,file_start,file_offset,archive_offset,compressed,format,context,line
+archive,path,file_start,file_offset,archive_offset,compressed,format,context,line
 ```
 
-`format`/`context` are empty unless `--inspect` matched; `line` is empty for
-binary files. `context` is the human labelled one-liner (the same text as the
-txt tag).
+`archive` is empty unless several archives were searched; `format`/`context` are
+empty unless `--inspect` matched; `line` is empty for binary files. `context` is
+the human labelled one-liner (the same text as the txt tag).
 
 ## counts (`--count`)
 

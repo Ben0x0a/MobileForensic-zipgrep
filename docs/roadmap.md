@@ -108,16 +108,22 @@ Grouped by theme. Each is a suggestion; tell me which to commit.
 
 ---
 
-## Next up (selected)
+## Done in v2
 
-Committed for the next iteration (refinements of the proposals above):
+- **Skip media by default** (#13) + `--include-media`.
+- **`--not-path` exclude filter** (#4).
+- **Pull SQLite sidecars** (`-wal`/`-shm`/`-journal`) alongside a matched DB.
+- **`--verify`** (#12) — SHA-256 the archive before & after (integrity attestation).
+- **Multiple archives / directory** (#7) — search several archives (or a folder
+  of them) in one run, tagging each result with its source archive.
 
-- **`--verify`** (#12, reframed) — an *option*, not a subcommand: hash the
-  archive before & after; secure but slower.
-- **Multi-pattern / IOC sweep** (#1) — `-e PAT` (repeatable) and `-f FILE`.
-- **`--not-path` exclude filter** (#4) — complement to `--path`.
-- **Multiple archives / recursive directory** (#7) — search several archives (or
-  a folder of them) in one run, tagging each result with its source archive.
+## v3 (later)
+
+Everything else below remains for v3 — notably multi-pattern / IOC sweep
+(`-e`/`-f`), tar / tar.gz inputs, nested archives, iOS GUID → app-name, presets,
+UTF-16 literals, byte `--context`, SQLite row dump, summary report,
+`--max-matches`, the execution log, ABX/SEGB inspectors (need sample files), and
+the long-file refactor.
 
 ---
 
