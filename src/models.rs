@@ -46,7 +46,7 @@ pub struct Entry {
 pub struct Inspection {
     /// Detected format, e.g. "txt", "json", "xml", "sqlite".
     pub format: String,
-    /// Human-readable one-liner, e.g. "line 12, col 4" or "$.users[3].token".
+    /// Human-readable one-liner, e.g. `line 12, col 4` or `$.users[3].token`.
     pub summary: String,
     /// Structured detail for machine-readable output.
     pub detail: serde_json::Value,
@@ -84,6 +84,9 @@ pub struct SearchHit {
 /// `serde_json::Value`, which is only `PartialEq` (it may hold floats).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchRecord {
+    /// Source archive, set only when more than one archive is searched in a run
+    /// (so single-archive output is unchanged).
+    pub archive: Option<String>,
     /// File name and path inside the archive.
     pub path: String,
     pub file_start: u64,
@@ -114,6 +117,7 @@ impl MatchRecord {
             entry.data_offset + hit.offset
         };
         Self {
+            archive: None,
             path: entry.name.clone(),
             file_start: entry.data_offset,
             file_offset: hit.offset,

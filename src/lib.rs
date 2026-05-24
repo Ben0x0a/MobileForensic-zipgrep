@@ -12,6 +12,7 @@
 
 pub mod engine;
 pub mod export;
+pub mod fast;
 pub mod filter;
 pub mod inspect;
 pub mod models;

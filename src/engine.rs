@@ -19,7 +19,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 use regex::bytes::Regex;
 
-use crate::filter::PathFilter;
+use crate::filter::EntryFilter;
 use crate::models::{Entry, MatchRecord};
 use crate::{inspect, search, zip};
 
@@ -61,15 +61,15 @@ impl Progress for NoProgress {
 
 /// Parse `archive` and return all matches of `re`, in entry order.
 ///
-/// `filter` restricts which entries are searched by internal path; an empty
-/// filter searches everything. When `deep` is set, each match is annotated with
-/// format-specific context where the file's format is recognised (see
+/// `filter` restricts which entries are searched (include/exclude globs and the
+/// media skip); see [`EntryFilter`]. When `deep` is set, each match is annotated
+/// with format-specific context where the file's format is recognised (see
 /// [`crate::inspect`]).
 pub fn search_archive(
     archive: &[u8],
     re: &Regex,
     deep: bool,
-    filter: &PathFilter,
+    filter: &EntryFilter,
 ) -> Result<Findings> {
     search_with_progress(archive, re, deep, filter, &NoProgress)
 }
@@ -85,11 +85,11 @@ pub fn search_with_progress(
     archive: &[u8],
     re: &Regex,
     deep: bool,
-    filter: &PathFilter,
+    filter: &EntryFilter,
     progress: &dyn Progress,
 ) -> Result<Findings> {
     let entries = zip::parse_entries(archive)?;
-    let targets: Vec<&Entry> = entries.iter().filter(|e| filter.matches(&e.name)).collect();
+    let targets: Vec<&Entry> = entries.iter().filter(|e| filter.selects(&e.name)).collect();
     progress.set_total(targets.len());
 
     let per_entry = targets

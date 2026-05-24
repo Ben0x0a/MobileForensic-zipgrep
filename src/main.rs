@@ -19,7 +19,7 @@
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -31,7 +31,8 @@ use regex::bytes::RegexBuilder;
 
 use mf_zipgrep::engine::{Findings, Progress, search_with_progress};
 use mf_zipgrep::export::{self, PullOutcome};
-use mf_zipgrep::filter::PathFilter;
+use mf_zipgrep::fast::FAST_EXCLUDE_GLOBS;
+use mf_zipgrep::filter::EntryFilter;
 use mf_zipgrep::output::{OutputFormat, write_counts, write_results};
 
 /// When to colourise matched text in the output.
@@ -65,8 +66,15 @@ struct SearchArgs {
     /// Regular expression to search for (matched against raw bytes).
     pattern: String,
 
-    /// ZIP archive to search.
-    archive: PathBuf,
+    /// Archive(s) to search (after the PATTERN), e.g. `a.zip b.zip`. With `-r`,
+    /// a directory argument is searched recursively for its `*.zip` files. More
+    /// than one archive tags each result with its source.
+    #[arg(value_name = "ARCHIVE", required = true)]
+    archives: Vec<PathBuf>,
+
+    /// Search directory arguments recursively for `*.zip` files.
+    #[arg(short = 'r', long = "recursive")]
+    recursive: bool,
 
     /// Case-insensitive matching.
     #[arg(short = 'i', long)]
@@ -98,6 +106,21 @@ struct SearchArgs {
     #[arg(long = "path", value_name = "GLOB")]
     path: Vec<String>,
 
+    /// Skip files whose internal path matches this wildcard. Repeatable; takes
+    /// precedence over --path.
+    #[arg(long = "not-path", value_name = "GLOB")]
+    not_path: Vec<String>,
+
+    /// Search image/video/audio files too (they are skipped by default, as they
+    /// hold no searchable text and dominate acquisition size).
+    #[arg(long = "include-media")]
+    include_media: bool,
+
+    /// Speed preset: skip media + use all cores + the fast exclude list (see
+    /// `src/fast.rs`). Bundles the common speed options behind one flag.
+    #[arg(long = "fast")]
+    fast: bool,
+
     /// Inspect matching files of supported formats for richer context.
     #[arg(long = "inspect")]
     inspect: bool,
@@ -117,6 +140,11 @@ struct SearchArgs {
     /// Refuse pulling if matched files exceed this size (e.g. 200MB, 1G).
     #[arg(long = "max-size", value_name = "SIZE", value_parser = parse_size)]
     max_size: Option<u64>,
+
+    /// Hash the archive (SHA-256) before and after the run and report whether it
+    /// changed — a slower, court-defensible integrity attestation.
+    #[arg(long = "verify")]
+    verify: bool,
 
     /// Highlight matches (txt to a terminal only): auto, always, or never.
     #[arg(
@@ -147,6 +175,11 @@ struct PullArgs {
     /// Refuse if the manifest's total size exceeds this (e.g. 200MB, 1G).
     #[arg(long = "max-size", value_name = "SIZE", value_parser = parse_size)]
     max_size: Option<u64>,
+
+    /// Hash the archive (SHA-256) before and after the run and report whether it
+    /// changed — a slower, court-defensible integrity attestation.
+    #[arg(long = "verify")]
+    verify: bool,
 }
 
 fn main() -> Result<()> {
@@ -158,11 +191,8 @@ fn main() -> Result<()> {
 
 /// Run the `pull` subcommand: re-ingest files listed in a manifest.
 fn run_pull(args: PullArgs) -> Result<()> {
-    // SAFETY: read-only forensic evidence; not mutated, assumed stable.
-    let file = File::open(&args.archive)
-        .with_context(|| format!("cannot open archive {}", args.archive.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("cannot mmap archive {}", args.archive.display()))?;
+    let mmap = open_archive(&args.archive)?;
+    let verify_before = args.verify.then(|| sha256_hex(&mmap));
 
     let manifest_file = File::open(&args.from_manifest)
         .with_context(|| format!("cannot open manifest {}", args.from_manifest.display()))?;
@@ -189,6 +219,10 @@ fn run_pull(args: PullArgs) -> Result<()> {
                 "refusing to pull: manifest total {total_size} bytes exceeds --max-size {cap}; nothing written"
             );
         }
+    }
+
+    if let Some(before) = verify_before {
+        report_verify(&before, &sha256_hex(&mmap));
     }
     Ok(())
 }
@@ -228,33 +262,168 @@ fn run_search(cli: SearchArgs) -> Result<()> {
             .context("failed to configure thread pool")?;
     }
 
-    // SAFETY: the archive is treated as read-only forensic evidence; we do not
-    // mutate it and assume it is not concurrently truncated during the scan.
-    let file = File::open(&cli.archive)
-        .with_context(|| format!("cannot open archive {}", cli.archive.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("cannot mmap archive {}", cli.archive.display()))?;
+    // Resolve the archive arguments into sources, each with a display label
+    // (relative path under a -r directory, else the path as given).
+    let sources = gather_sources(&cli.archives, cli.recursive)?;
+    if sources.is_empty() {
+        anyhow::bail!("no archives given — list archive files, or use -r with a directory");
+    }
+    let multi = sources.len() > 1;
+    if multi && (cli.pull.is_some() || cli.manifest.is_some()) {
+        anyhow::bail!("--pull/--manifest require a single archive");
+    }
 
-    let filter = PathFilter::new(&cli.path);
-    // --count needs no inspection; skip that work when only counting.
-    let findings = search_with_reporter(&mmap, &re, cli.inspect && !cli.count, &filter)?;
+    // --fast bundles the speed options: skip media (default) + all cores
+    // (default) + the fast exclude list, added to any --not-path globs.
+    let mut excludes = cli.not_path.clone();
+    if cli.fast {
+        excludes.extend(FAST_EXCLUDE_GLOBS.iter().map(|g| g.to_string()));
+    }
+    let filter = EntryFilter::new(&cli.path, &excludes, !cli.include_media);
 
     if cli.count {
-        let counts: Vec<(&str, usize)> = findings
-            .files
-            .iter()
-            .map(|f| (f.entry.name.as_str(), f.offsets.len()))
-            .collect();
+        // Per-file counts aggregated across archives (path tagged when multi).
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for src in &sources {
+            let mmap = open_archive(&src.path)?;
+            let verify_before = cli.verify.then(|| sha256_hex(&mmap));
+            let findings = search_with_reporter(&mmap, &re, false, &filter)?;
+            for f in &findings.files {
+                let path = if multi {
+                    format!("{}/{}", src.label, f.entry.name)
+                } else {
+                    f.entry.name.clone()
+                };
+                counts.push((path, f.offsets.len()));
+            }
+            if let Some(before) = verify_before {
+                report_verify(&before, &sha256_hex(&mmap));
+            }
+        }
+        let pairs: Vec<(&str, usize)> = counts.iter().map(|(p, c)| (p.as_str(), *c)).collect();
         emit(cli.output.as_deref(), |w| {
-            write_counts(&counts, cli.format, w)
+            write_counts(&pairs, cli.format, w)
         })?;
     } else {
+        // Match records aggregated across archives (tagged when multi).
+        let mut records = Vec::new();
+        for src in &sources {
+            let mmap = open_archive(&src.path)?;
+            let verify_before = cli.verify.then(|| sha256_hex(&mmap));
+            let mut findings = search_with_reporter(&mmap, &re, cli.inspect, &filter)?;
+            if multi {
+                for r in &mut findings.records {
+                    r.archive = Some(src.label.clone());
+                }
+            } else {
+                // --manifest/--pull only apply to a single archive (guarded above).
+                export_if_requested(&cli, &mmap, &findings)?;
+            }
+            records.append(&mut findings.records);
+            if let Some(before) = verify_before {
+                report_verify(&before, &sha256_hex(&mmap));
+            }
+        }
         emit(cli.output.as_deref(), |w| {
-            write_results(&findings.records, cli.format, colourise, w)
+            write_results(&records, cli.format, colourise, w)
         })?;
     }
 
-    export_if_requested(&cli, &mmap, &findings)
+    Ok(())
+}
+
+/// An archive to search, plus the label shown for it (relative to a `-r`
+/// directory, or the path as given).
+struct Source {
+    path: PathBuf,
+    label: String,
+}
+
+/// Memory-map an archive read-only.
+///
+/// SAFETY: the archive is treated as read-only forensic evidence; we do not
+/// mutate it and assume it is not concurrently truncated during the scan.
+fn open_archive(path: &Path) -> Result<Mmap> {
+    let file =
+        File::open(path).with_context(|| format!("cannot open archive {}", path.display()))?;
+    unsafe { Mmap::map(&file) }.with_context(|| format!("cannot mmap archive {}", path.display()))
+}
+
+/// Turn the operand paths into [`Source`]s.
+///
+/// A file becomes one source labelled by its given path. A directory (only with
+/// `recursive`) is walked for `*.zip`, each labelled by its path **relative to
+/// that directory**, so output reads like `sub/case.zip/internal/file`.
+fn gather_sources(paths: &[PathBuf], recursive: bool) -> Result<Vec<Source>> {
+    let mut sources = Vec::new();
+    for arg in paths {
+        if arg.is_dir() {
+            if !recursive {
+                anyhow::bail!(
+                    "{} is a directory; pass -r to search it recursively",
+                    arg.display()
+                );
+            }
+            let mut zips = Vec::new();
+            collect_zips(arg, &mut zips)
+                .with_context(|| format!("cannot read directory {}", arg.display()))?;
+            zips.sort();
+            for zip in zips {
+                let label = zip
+                    .strip_prefix(arg)
+                    .unwrap_or(&zip)
+                    .to_string_lossy()
+                    .into_owned();
+                sources.push(Source { path: zip, label });
+            }
+        } else {
+            sources.push(Source {
+                path: arg.clone(),
+                label: arg.to_string_lossy().into_owned(),
+            });
+        }
+    }
+    Ok(sources)
+}
+
+/// Recursively collect `*.zip` files under `dir` into `out`.
+fn collect_zips(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            collect_zips(&path, out)?;
+        } else if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// SHA-256 of `bytes` as lowercase hex.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Print the before/after archive hashes and whether the evidence was unchanged.
+///
+/// mf-zipgrep opens the archive read-only and never writes to it, so the hashes
+/// match by construction; this records that fact as an attestation. Goes to
+/// stderr so it never mixes with results on stdout.
+fn report_verify(before: &str, after: &str) {
+    eprintln!("verify: archive sha256 before  {before}");
+    eprintln!("verify: archive sha256 after   {after}");
+    if before == after {
+        eprintln!("verify: archive unchanged during the run (read-only integrity confirmed)");
+    } else {
+        eprintln!("verify: WARNING — archive changed during the run");
+    }
 }
 
 /// Run the search, showing a live progress line on stderr when it is a terminal.
@@ -267,7 +436,7 @@ fn search_with_reporter(
     archive: &[u8],
     re: &regex::bytes::Regex,
     deep: bool,
-    filter: &PathFilter,
+    filter: &EntryFilter,
 ) -> Result<Findings> {
     let progress = Arc::new(TtyProgress::default());
     let stop = Arc::new(AtomicBool::new(false));
@@ -412,5 +581,31 @@ fn emit(
             let mut w = stdout.lock();
             render(&mut w)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_size, sha256_hex};
+
+    #[test]
+    fn sha256_matches_known_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn parse_size_handles_units() {
+        assert_eq!(parse_size("1024").unwrap(), 1024);
+        assert_eq!(parse_size("1k").unwrap(), 1024);
+        assert_eq!(parse_size("2MB").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_size("1G").unwrap(), 1024 * 1024 * 1024);
+        assert!(parse_size("nope").is_err());
     }
 }

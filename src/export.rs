@@ -145,6 +145,11 @@ pub fn pull(
         });
     }
 
+    // The full entry list lets us also pull each database's SQLite sidecars.
+    let entries = zip::parse_entries(archive)?;
+    let by_path: HashMap<&str, &Entry> = entries.iter().map(|e| (e.name.as_str(), e)).collect();
+
+    let mut pulled = 0usize;
     let mut bytes = 0u64;
     for (item, file) in plan.items.iter().zip(files) {
         // Content is read (and decompressed for DEFLATE) once, here.
@@ -155,11 +160,18 @@ pub fn pull(
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
         fs::write(&dest, &content).with_context(|| format!("cannot write {}", dest.display()))?;
+        pulled += 1;
         bytes += content.len() as u64;
+
+        // Sidecars to pull come from the file's inspector (e.g. SQLite's -wal).
+        let suffixes = crate::inspect::sidecars_for(&file.entry.name, &content);
+        let (sf, sb) = pull_sidecars(archive, &by_path, &file.entry.name, &dest, suffixes)?;
+        pulled += sf;
+        bytes += sb;
     }
 
     Ok(PullOutcome::Pulled {
-        files: plan.items.len(),
+        files: pulled,
         bytes,
         skipped: 0,
     })
@@ -211,6 +223,11 @@ pub fn pull_from_manifest(
         fs::write(&dest, &content).with_context(|| format!("cannot write {}", dest.display()))?;
         files += 1;
         bytes += content.len() as u64;
+
+        let suffixes = crate::inspect::sidecars_for(&entry.internal_path, &content);
+        let (sf, sb) = pull_sidecars(archive, &by_path, &entry.internal_path, &dest, suffixes)?;
+        files += sf;
+        bytes += sb;
     }
 
     Ok(PullOutcome::Pulled {
@@ -218,6 +235,42 @@ pub fn pull_from_manifest(
         bytes,
         skipped,
     })
+}
+
+/// Pull a file's declared sidecars into the same folder as `main_dest` (e.g.
+/// `sms.db` → `sms.db-wal`), returning (count, bytes).
+///
+/// The `suffixes` come from the file's inspector (see
+/// [`crate::inspect::sidecars_for`]); each one names a sibling entry to fetch if
+/// present. For SQLite this keeps the exported database complete — uncommitted
+/// rows live in the `-wal`.
+fn pull_sidecars(
+    archive: &[u8],
+    by_path: &HashMap<&str, &Entry>,
+    internal_path: &str,
+    main_dest: &Path,
+    suffixes: &[&str],
+) -> Result<(usize, u64)> {
+    let main_name = main_dest
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    for suffix in suffixes {
+        let sidecar_path = format!("{internal_path}{suffix}");
+        let Some(entry) = by_path.get(sidecar_path.as_str()) else {
+            continue;
+        };
+        let content = search::entry_content(archive, entry)?;
+        let mut dest = main_dest.to_path_buf();
+        dest.set_file_name(format!("{main_name}{suffix}"));
+        fs::write(&dest, &content).with_context(|| format!("cannot write {}", dest.display()))?;
+        files += 1;
+        bytes += content.len() as u64;
+    }
+    Ok((files, bytes))
 }
 
 /// Join a manifest `output_path` under `dir`, dropping any `..`/empty/absolute
