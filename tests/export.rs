@@ -12,7 +12,7 @@ use std::fs;
 use common::{FileSpec, build_zip};
 use mf_zipgrep::engine::search_archive;
 use mf_zipgrep::export::{self, PullOutcome};
-use mf_zipgrep::filter::PathFilter;
+use mf_zipgrep::filter::EntryFilter;
 use regex::bytes::Regex;
 
 /// Build a two-file archive (same basename, different dirs) and search it.
@@ -26,7 +26,7 @@ fn findings_two_infoplists() -> (Vec<u8>, mf_zipgrep::engine::Findings) {
         &zip,
         &Regex::new("TARGET").unwrap(),
         false,
-        &PathFilter::new(&[]),
+        &EntryFilter::all(),
     )
     .unwrap();
     (zip, findings)
@@ -101,6 +101,39 @@ fn pull_writes_files_under_their_folders() {
         let content = fs::read(&path).unwrap();
         assert!(content.starts_with(b"key TARGET"));
     }
+}
+
+#[test]
+fn pull_includes_sqlite_sidecars() {
+    // A matched database with -wal/-shm sidecars in the archive.
+    let files = [
+        FileSpec::stored("Library/sms.db", b"row with TARGET"),
+        FileSpec::stored("Library/sms.db-wal", b"wal-bytes"),
+        FileSpec::stored("Library/sms.db-shm", b"shm-bytes"),
+    ];
+    let zip = build_zip(&files, false);
+    let findings = search_archive(
+        &zip,
+        &Regex::new("TARGET").unwrap(),
+        false,
+        &EntryFilter::all(),
+    )
+    .unwrap();
+    assert_eq!(findings.files.len(), 1); // only sms.db matched
+
+    let plan = export::plan(&findings.files);
+    let dir = tempfile::tempdir().unwrap();
+    let outcome = export::pull(&plan, &zip, &findings.files, dir.path(), None).unwrap();
+    match outcome {
+        PullOutcome::Pulled { files, .. } => assert_eq!(files, 3), // db + wal + shm
+        PullOutcome::Refused { .. } => panic!("should not refuse without a cap"),
+    }
+
+    // The sidecars land in the same folder as the database, beside it.
+    let folder = dir.path().join(&plan.items[0].folder);
+    assert!(folder.join("sms.db").exists());
+    assert_eq!(fs::read(folder.join("sms.db-wal")).unwrap(), b"wal-bytes");
+    assert!(folder.join("sms.db-shm").exists());
 }
 
 #[test]

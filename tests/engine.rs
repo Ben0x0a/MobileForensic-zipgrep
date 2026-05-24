@@ -14,12 +14,12 @@ use common::{FileSpec, build_zip};
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
 use mf_zipgrep::engine::{Progress, search_archive, search_with_progress};
-use mf_zipgrep::filter::PathFilter;
+use mf_zipgrep::filter::EntryFilter;
 use regex::bytes::Regex;
 
 /// A filter that searches everything.
-fn no_filter() -> PathFilter {
-    PathFilter::new(&[])
+fn no_filter() -> EntryFilter {
+    EntryFilter::all()
 }
 
 fn deflate(plain: &[u8]) -> Vec<u8> {
@@ -96,7 +96,7 @@ fn path_filter_restricts_searched_entries() {
         FileSpec::stored("a/skip.txt", b"x TARGET y"),
     ];
     let zip = build_zip(&files, false);
-    let filter = PathFilter::new(&["*.db".to_string()]);
+    let filter = EntryFilter::new(&["*.db".to_string()], &[], false);
 
     let findings = search_archive(&zip, &Regex::new("TARGET").unwrap(), false, &filter).unwrap();
 
@@ -139,7 +139,7 @@ fn progress_counts_every_searched_entry() {
 
     // With a filter, the total reflects only the entries actually searched.
     let filtered = CountProgress::default();
-    let only_db = PathFilter::new(&["*.db".to_string()]);
+    let only_db = EntryFilter::new(&["*.db".to_string()], &[], false);
     search_with_progress(&zip, &re, false, &only_db, &filtered).unwrap();
     assert_eq!(filtered.total.load(Ordering::Relaxed), 1);
     assert_eq!(filtered.done.load(Ordering::Relaxed), 1);
