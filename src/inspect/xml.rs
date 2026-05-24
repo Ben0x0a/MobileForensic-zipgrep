@@ -23,6 +23,12 @@ use crate::models::Inspection;
 pub struct Xml;
 
 impl super::Inspector for Xml {
+    fn name(&self) -> &'static str {
+        "xml"
+    }
+    fn category(&self) -> &'static str {
+        "structured"
+    }
     fn extensions(&self) -> &'static [&'static str] {
         &["xml"]
     }

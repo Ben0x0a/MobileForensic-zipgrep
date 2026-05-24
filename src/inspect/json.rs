@@ -26,6 +26,12 @@ enum Seg {
 pub struct Json;
 
 impl super::Inspector for Json {
+    fn name(&self) -> &'static str {
+        "json"
+    }
+    fn category(&self) -> &'static str {
+        "structured"
+    }
     fn extensions(&self) -> &'static [&'static str] {
         &["json"]
     }

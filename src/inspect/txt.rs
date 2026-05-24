@@ -16,6 +16,12 @@ use crate::models::Inspection;
 pub struct Txt;
 
 impl super::Inspector for Txt {
+    fn name(&self) -> &'static str {
+        "txt"
+    }
+    fn category(&self) -> &'static str {
+        "text"
+    }
     fn extensions(&self) -> &'static [&'static str] {
         &["txt", "log", "text"]
     }

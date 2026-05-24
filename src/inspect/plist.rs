@@ -22,6 +22,12 @@ use crate::models::Inspection;
 pub struct Plist;
 
 impl super::Inspector for Plist {
+    fn name(&self) -> &'static str {
+        "plist"
+    }
+    fn category(&self) -> &'static str {
+        "structured"
+    }
     fn extensions(&self) -> &'static [&'static str] {
         &["plist"]
     }

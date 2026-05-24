@@ -18,6 +18,12 @@ use crate::models::Inspection;
 pub struct Csv;
 
 impl super::Inspector for Csv {
+    fn name(&self) -> &'static str {
+        "csv"
+    }
+    fn category(&self) -> &'static str {
+        "text"
+    }
     fn extensions(&self) -> &'static [&'static str] {
         &["csv"]
     }

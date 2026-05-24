@@ -1,9 +1,12 @@
 //! SQLite inspector: map a byte offset to a table cell, or fall back to page.
 //!
 //! Defines: `inspect`, which resolves a match offset inside a SQLite database
-//! to `table + rowid + column` when the byte lies in a live table-leaf cell,
-//! and otherwise reports just the page number and offset-in-page (freelist
-//! pages, free blocks, interior/overflow pages, unallocated space).
+//! to `table + rowid + column [TYPE]` when the byte lies in a live table-leaf
+//! cell, and otherwise reports just the page number and offset-in-page (freelist
+//! pages, free blocks, interior/overflow pages, unallocated space). When the
+//! matched cell is a BLOB, its bytes are re-classified through the inspector
+//! registry (`super::detect_by_header`) so an embedded format (e.g. a `bplist`)
+//! is recognised and resolved too.
 //! Used by: `inspect::inspect` (dispatch).
 //! Uses: `crate::models::Inspection`, `serde_json`.
 //!
@@ -53,6 +56,12 @@ struct Cell {
 pub struct Sqlite;
 
 impl super::Inspector for Sqlite {
+    fn name(&self) -> &'static str {
+        "sqlite"
+    }
+    fn category(&self) -> &'static str {
+        "database"
+    }
     fn extensions(&self) -> &'static [&'static str] {
         &["sqlite", "sqlite3", "db", "sqlitedb"]
     }
@@ -63,7 +72,7 @@ impl super::Inspector for Sqlite {
         locate(content, offset)
     }
     fn sidecars(&self) -> &'static [&'static str] {
-        // Uncommitted rows live in the WAL; pull these so the DB opens complete.
+        // Uncommitted rows live in the WAL; export these so the DB opens complete.
         &["-wal", "-shm", "-journal"]
     }
 }
@@ -147,20 +156,50 @@ fn resolve(
                     .get(idx)
                     .cloned()
                     .unwrap_or_else(|| format!("column{idx}"));
+                let ty = serial_type_name(col.serial);
                 let cell_value = render_cell(content, col);
+
+                let mut summary = format!(
+                    "table: {}  column: {} [{}]  row: {}  cell: {}",
+                    table.name, column, ty, cell.rowid, cell_value
+                );
+                let mut detail = json!({
+                    "page": page,
+                    "table": table.name,
+                    "rowid": cell.rowid,
+                    "column": column,
+                    "type": ty,
+                    "cell": cell_value,
+                });
+
+                // A BLOB may itself be a recognised format (e.g. a bplist stored
+                // in a cell). Classify it by signature and, when an inspector
+                // claims it, resolve the match position inside the blob as well —
+                // reusing the same inspector registry, no SQLite-specific parsing.
+                if is_blob(col.serial)
+                    && let Some(blob) = content.get(col.start..col.start + col.len)
+                    && let Some(insp) = super::detect_by_header(blob)
+                {
+                    let nested = insp.inspect(blob, offset - col.start);
+                    let blob_format = nested
+                        .as_ref()
+                        .map_or_else(|| insp.name().to_string(), |n| n.format.clone());
+                    summary.push_str(&format!("  blob: {blob_format}"));
+                    if let Some(n) = &nested {
+                        summary.push_str(&format!("  {}", n.summary));
+                    }
+                    if let Some(obj) = detail.as_object_mut() {
+                        obj.insert("blob_format".into(), json!(blob_format));
+                        if let Some(n) = nested {
+                            obj.insert("blob_context".into(), n.detail);
+                        }
+                    }
+                }
+
                 return Some(Inspection {
                     format: "sqlite".into(),
-                    summary: format!(
-                        "table: {}  column: {}  row: {}  cell: {}",
-                        table.name, column, cell.rowid, cell_value
-                    ),
-                    detail: json!({
-                        "page": page,
-                        "table": table.name,
-                        "rowid": cell.rowid,
-                        "column": column,
-                        "cell": cell_value,
-                    }),
+                    summary,
+                    detail,
                 });
             }
         }
@@ -337,6 +376,23 @@ fn parse_cell(content: &[u8], db: &Db, cell_file: usize) -> Option<Cell> {
     })
 }
 
+/// SQLite storage-class name for a record serial type (for `column [TYPE]`).
+fn serial_type_name(serial: u64) -> &'static str {
+    match serial {
+        0 => "NULL",
+        1..=6 | 8 | 9 => "INTEGER",
+        7 => "REAL",
+        s if s >= 12 && s.is_multiple_of(2) => "BLOB",
+        s if s >= 13 => "TEXT",
+        _ => "?", // 10, 11 are reserved and unused in practice
+    }
+}
+
+/// True if the serial type denotes a BLOB value (even, ≥ 12).
+fn is_blob(serial: u64) -> bool {
+    serial >= 12 && serial.is_multiple_of(2)
+}
+
 /// Byte length of a value with the given record serial type.
 fn serial_len(serial: u64) -> usize {
     match serial {
@@ -347,8 +403,8 @@ fn serial_len(serial: u64) -> usize {
         4 => 4,
         5 => 6,
         6 | 7 => 8,
-        s if s % 2 == 0 => ((s - 12) / 2) as usize, // BLOB
-        s => ((s - 13) / 2) as usize,               // TEXT
+        s if s.is_multiple_of(2) => ((s - 12) / 2) as usize, // BLOB
+        s => ((s - 13) / 2) as usize,                        // TEXT
     }
 }
 
