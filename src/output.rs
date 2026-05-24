@@ -97,6 +97,9 @@ fn textual_line(r: &MatchRecord) -> Option<Cow<'_, str>> {
 /// only when the match was inspected (`--inspect`).
 #[derive(Serialize)]
 struct JsonView<'a> {
+    /// Source archive, present only when several archives were searched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    archive: Option<&'a str>,
     path: &'a str,
     file_start: u64,
     file_offset: u64,
@@ -114,6 +117,7 @@ struct JsonView<'a> {
 impl<'a> From<&'a MatchRecord> for JsonView<'a> {
     fn from(r: &'a MatchRecord) -> Self {
         Self {
+            archive: r.archive.as_deref(),
             path: &r.path,
             file_start: r.file_start,
             file_offset: r.file_offset,
@@ -130,6 +134,8 @@ impl<'a> From<&'a MatchRecord> for JsonView<'a> {
 /// `format`/`context` are empty unless inspected; `line` is empty for binary.
 #[derive(Serialize)]
 struct CsvView<'a> {
+    /// Source archive (empty unless several archives were searched).
+    archive: &'a str,
     path: &'a str,
     file_start: u64,
     file_offset: u64,
@@ -143,6 +149,7 @@ struct CsvView<'a> {
 impl<'a> From<&'a MatchRecord> for CsvView<'a> {
     fn from(r: &'a MatchRecord) -> Self {
         Self {
+            archive: r.archive.as_deref().unwrap_or(""),
             path: &r.path,
             file_start: r.file_start,
             file_offset: r.file_offset,
@@ -162,7 +169,12 @@ impl<'a> From<&'a MatchRecord> for CsvView<'a> {
 /// files contribute only `path:0x<offset>` — their bytes are never dumped.
 fn write_txt(records: &[MatchRecord], colourise: bool, w: &mut dyn Write) -> Result<()> {
     for r in records {
-        let mut out = format!("{}:0x{:x}", r.path, r.file_offset);
+        // The source archive (when set) joins the internal path like a folder,
+        // so a match reads as `case.zip/internal/file:0x<off>`.
+        let mut out = match &r.archive {
+            Some(a) => format!("{a}/{}:0x{:x}", r.path, r.file_offset),
+            None => format!("{}:0x{:x}", r.path, r.file_offset),
+        };
         if is_textual(&r.line) {
             out.push(':');
             out.push_str(&render_line(r, colourise));
