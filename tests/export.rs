@@ -1,7 +1,7 @@
-//! Tests for export: planning, manifest, and pulling to disk.
+//! Tests for export: planning, manifest, and exporting to disk.
 //!
 //! Defines: tests for folder naming (basename + stable path hash), manifest
-//! content + total size, pull layout/content, and the --max-size refusal.
+//! content + total size, export layout/content, and the --max-size refusal.
 //! Uses: `common` (fixture builder), `mf_zipgrep::{engine, export}`,
 //! `serde_json`, `tempfile`.
 
@@ -11,7 +11,7 @@ use std::fs;
 
 use common::{FileSpec, build_zip};
 use mf_zipgrep::engine::search_archive;
-use mf_zipgrep::export::{self, PullOutcome};
+use mf_zipgrep::export::{self, ExportOutcome};
 use mf_zipgrep::filter::EntryFilter;
 use regex::bytes::Regex;
 
@@ -84,15 +84,15 @@ fn manifest_lists_files_with_total_size() {
 }
 
 #[test]
-fn pull_writes_files_under_their_folders() {
+fn export_writes_files_under_their_folders() {
     let (zip, findings) = findings_two_infoplists();
     let plan = export::plan(&findings.files);
     let dir = tempfile::tempdir().unwrap();
 
-    let outcome = export::pull(&plan, &zip, &findings.files, dir.path(), None).unwrap();
+    let outcome = export::export_files(&plan, &zip, &findings.files, dir.path(), None).unwrap();
     match outcome {
-        PullOutcome::Pulled { files, .. } => assert_eq!(files, 2),
-        PullOutcome::Refused { .. } => panic!("should not refuse without a cap"),
+        ExportOutcome::Exported { files, .. } => assert_eq!(files, 2),
+        ExportOutcome::Refused { .. } => panic!("should not refuse without a cap"),
     }
 
     // Each file lands at DIR/<folder>/Info.plist with its real content.
@@ -104,7 +104,7 @@ fn pull_writes_files_under_their_folders() {
 }
 
 #[test]
-fn pull_includes_sqlite_sidecars() {
+fn export_includes_sqlite_sidecars() {
     // A matched database with -wal/-shm sidecars in the archive.
     let files = [
         FileSpec::stored("Library/sms.db", b"row with TARGET"),
@@ -123,10 +123,10 @@ fn pull_includes_sqlite_sidecars() {
 
     let plan = export::plan(&findings.files);
     let dir = tempfile::tempdir().unwrap();
-    let outcome = export::pull(&plan, &zip, &findings.files, dir.path(), None).unwrap();
+    let outcome = export::export_files(&plan, &zip, &findings.files, dir.path(), None).unwrap();
     match outcome {
-        PullOutcome::Pulled { files, .. } => assert_eq!(files, 3), // db + wal + shm
-        PullOutcome::Refused { .. } => panic!("should not refuse without a cap"),
+        ExportOutcome::Exported { files, .. } => assert_eq!(files, 3), // db + wal + shm
+        ExportOutcome::Refused { .. } => panic!("should not refuse without a cap"),
     }
 
     // The sidecars land in the same folder as the database, beside it.
@@ -137,42 +137,42 @@ fn pull_includes_sqlite_sidecars() {
 }
 
 #[test]
-fn pull_refuses_when_over_max_size() {
+fn export_refuses_when_over_max_size() {
     let (zip, findings) = findings_two_infoplists();
     let plan = export::plan(&findings.files);
     let dir = tempfile::tempdir().unwrap();
 
     // Cap below the 28-byte total.
-    let outcome = export::pull(&plan, &zip, &findings.files, dir.path(), Some(10)).unwrap();
+    let outcome = export::export_files(&plan, &zip, &findings.files, dir.path(), Some(10)).unwrap();
     match outcome {
-        PullOutcome::Refused { total_size, cap } => {
+        ExportOutcome::Refused { total_size, cap } => {
             assert_eq!(total_size, 28);
             assert_eq!(cap, 10);
         }
-        PullOutcome::Pulled { .. } => panic!("should have refused"),
+        ExportOutcome::Exported { .. } => panic!("should have refused"),
     }
     // Nothing was written.
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
 #[test]
-fn pull_from_manifest_round_trips() {
+fn export_from_manifest_round_trips() {
     let (zip, findings) = findings_two_infoplists();
     let plan = export::plan(&findings.files);
 
-    // Write the manifest, then read it back and pull from it.
+    // Write the manifest, then read it back and export from it.
     let mut buf = Vec::new();
     export::write_manifest(&plan, &mut buf).unwrap();
     let manifest = export::read_manifest(&buf[..]).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
-    let outcome = export::pull_from_manifest(&manifest, &zip, dir.path(), None).unwrap();
+    let outcome = export::export_from_manifest(&manifest, &zip, dir.path(), None).unwrap();
     match outcome {
-        PullOutcome::Pulled { files, skipped, .. } => {
+        ExportOutcome::Exported { files, skipped, .. } => {
             assert_eq!(files, 2);
             assert_eq!(skipped, 0);
         }
-        PullOutcome::Refused { .. } => panic!("should not refuse without a cap"),
+        ExportOutcome::Refused { .. } => panic!("should not refuse without a cap"),
     }
 
     // Each file exists at the path the manifest recorded.
@@ -186,7 +186,7 @@ fn pull_from_manifest_round_trips() {
 }
 
 #[test]
-fn pull_from_manifest_skips_missing_entries() {
+fn export_from_manifest_skips_missing_entries() {
     let (zip, _findings) = findings_two_infoplists();
     let manifest = export::Manifest {
         total_size: 5,
@@ -201,12 +201,12 @@ fn pull_from_manifest_skips_missing_entries() {
     };
     let dir = tempfile::tempdir().unwrap();
 
-    let outcome = export::pull_from_manifest(&manifest, &zip, dir.path(), None).unwrap();
+    let outcome = export::export_from_manifest(&manifest, &zip, dir.path(), None).unwrap();
     match outcome {
-        PullOutcome::Pulled { files, skipped, .. } => {
+        ExportOutcome::Exported { files, skipped, .. } => {
             assert_eq!(files, 0);
             assert_eq!(skipped, 1);
         }
-        PullOutcome::Refused { .. } => panic!("should not refuse"),
+        ExportOutcome::Refused { .. } => panic!("should not refuse"),
     }
 }

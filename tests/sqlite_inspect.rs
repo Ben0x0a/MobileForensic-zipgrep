@@ -10,10 +10,17 @@
 use mf_zipgrep::inspect::inspect;
 
 const DB: &[u8] = include_bytes!("fixtures/messages.sqlite");
+/// A database whose `items.payload` BLOB holds an Apple binary plist.
+const BLOB_DB: &[u8] = include_bytes!("fixtures/blob.sqlite");
 
 /// Byte offset of the first occurrence of `needle` in the database.
 fn at(needle: &str) -> usize {
-    DB.windows(needle.len())
+    at_in(DB, needle)
+}
+
+/// Byte offset of the first occurrence of `needle` in `hay`.
+fn at_in(hay: &[u8], needle: &str) -> usize {
+    hay.windows(needle.len())
         .position(|w| w == needle.as_bytes())
         .expect("needle not found in fixture")
 }
@@ -66,4 +73,34 @@ fn detection_uses_header_over_extension() {
     let insp = inspect("evidence.txt", DB, at("UNIQUE_NEEDLE_42")).unwrap();
     assert_eq!(insp.format, "sqlite");
     assert_eq!(insp.detail["table"], "messages");
+}
+
+#[test]
+fn reports_column_storage_type() {
+    // The matched value is text, so the column's type is reported as TEXT, in
+    // both the structured detail and the labelled summary (`column [TYPE]`).
+    let insp = inspect("messages.sqlite", DB, at("UNIQUE_NEEDLE_42")).unwrap();
+    assert_eq!(insp.detail["type"], "TEXT");
+    assert!(insp.summary.contains("[TEXT]"), "summary: {}", insp.summary);
+}
+
+#[test]
+fn blob_cell_is_classified_and_inspected_by_signature() {
+    // A match inside the BLOB column lands in an embedded binary plist; the blob
+    // is recognised by signature and resolved by the plist inspector.
+    let insp = inspect("blob.sqlite", BLOB_DB, at_in(BLOB_DB, "Servers")).unwrap();
+    assert_eq!(insp.format, "sqlite");
+    assert_eq!(insp.detail["column"], "payload");
+    assert_eq!(insp.detail["type"], "BLOB");
+    assert_eq!(insp.detail["blob_format"], "bplist");
+    // The nested plist context resolves a key path inside the blob.
+    let path = insp.detail["blob_context"]["path"].as_str().unwrap();
+    assert!(path.contains("Servers"), "blob path: {path}");
+    // The txt summary surfaces the same: `... [BLOB] ... blob: bplist ...`.
+    assert!(insp.summary.contains("[BLOB]"), "summary: {}", insp.summary);
+    assert!(
+        insp.summary.contains("blob: bplist"),
+        "summary: {}",
+        insp.summary
+    );
 }

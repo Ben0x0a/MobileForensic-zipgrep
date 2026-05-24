@@ -53,7 +53,7 @@ fn sample() -> Vec<MatchRecord> {
 
 fn render(records: &[MatchRecord], format: OutputFormat, colourise: bool) -> String {
     let mut buf = Vec::new();
-    write_results(records, format, colourise, &mut buf).unwrap();
+    write_results(records, format, colourise, false, &mut buf).unwrap();
     String::from_utf8(buf).unwrap()
 }
 

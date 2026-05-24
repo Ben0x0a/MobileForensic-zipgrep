@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::{FileSpec, build_zip};
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
-use mf_zipgrep::engine::{Progress, search_archive, search_with_progress};
+use mf_zipgrep::engine::{NoProgress, Progress, search_archive, search_with_progress};
 use mf_zipgrep::filter::EntryFilter;
 use regex::bytes::Regex;
 
@@ -96,7 +96,7 @@ fn path_filter_restricts_searched_entries() {
         FileSpec::stored("a/skip.txt", b"x TARGET y"),
     ];
     let zip = build_zip(&files, false);
-    let filter = EntryFilter::new(&["*.db".to_string()], &[], false);
+    let filter = EntryFilter::new(&["*.db".to_string()], &[], &[], false);
 
     let findings = search_archive(&zip, &Regex::new("TARGET").unwrap(), false, &filter).unwrap();
 
@@ -104,6 +104,67 @@ fn path_filter_restricts_searched_entries() {
     assert_eq!(findings.files.len(), 1);
     assert_eq!(findings.records.len(), 1);
     assert_eq!(findings.records[0].path, "a/keep.db");
+}
+
+#[test]
+fn type_filter_keeps_only_requested_category() {
+    // A real SQLite header (detected as database) and a plain text file.
+    let mut db = b"SQLite format 3\x00".to_vec();
+    db.extend_from_slice(b" ... TARGET ...");
+    let files = [
+        FileSpec::stored("a.db", &db),
+        FileSpec::stored("b.txt", b"x TARGET y"),
+    ];
+    let zip = build_zip(&files, false);
+
+    // --type database keeps only the SQLite file (header-detected).
+    let only_db = EntryFilter::new(&[], &[], &["database".to_string()], false);
+    let findings = search_archive(&zip, &Regex::new("TARGET").unwrap(), false, &only_db).unwrap();
+    assert_eq!(findings.files.len(), 1);
+    assert_eq!(findings.records[0].path, "a.db");
+}
+
+#[test]
+fn skip_media_drops_media_files_by_signature() {
+    // A JPEG (magic, no media extension) is recognised by header and skipped
+    // even though its name does not say "image".
+    let mut jpg = vec![0xFF, 0xD8, 0xFF];
+    jpg.extend_from_slice(b" TARGET trailing");
+    let files = [
+        FileSpec::stored("notes.txt", b"x TARGET y"),
+        FileSpec::stored("blob.dat", &jpg),
+    ];
+    let zip = build_zip(&files, false);
+
+    let skip_media = EntryFilter::new(&[], &[], &[], true);
+    let findings =
+        search_archive(&zip, &Regex::new("TARGET").unwrap(), false, &skip_media).unwrap();
+    assert_eq!(findings.files.len(), 1);
+    assert_eq!(findings.records[0].path, "notes.txt");
+}
+
+#[test]
+fn match_path_lists_files_whose_path_matches() {
+    let files = [
+        FileSpec::stored("app/banking/creds.db", b"no hit in content"),
+        FileSpec::stored("app/photos/img.jpg", b"banking is only in this content"),
+        FileSpec::stored("notes.txt", b"banking"),
+    ];
+    let zip = build_zip(&files, false);
+    let re = Regex::new("banking").unwrap();
+
+    let findings =
+        search_with_progress(&zip, &re, false, true, &EntryFilter::all(), &NoProgress).unwrap();
+
+    // Only the file with "banking" in its PATH is reported (content ignored).
+    assert_eq!(findings.records.len(), 1);
+    assert_eq!(findings.records[0].path, "app/banking/creds.db");
+    // The displayed line is the path itself, with the matched span recorded.
+    assert_eq!(findings.records[0].line, b"app/banking/creds.db");
+    let r = &findings.records[0].match_in_line;
+    assert_eq!(&findings.records[0].line[r.start..r.end], b"banking");
+    // The matched file is available for export.
+    assert_eq!(findings.files.len(), 1);
 }
 
 #[derive(Default)]
@@ -133,14 +194,14 @@ fn progress_counts_every_searched_entry() {
 
     // No filter: total and inc count all three entries (matching or not).
     let all = CountProgress::default();
-    search_with_progress(&zip, &re, false, &no_filter(), &all).unwrap();
+    search_with_progress(&zip, &re, false, false, &no_filter(), &all).unwrap();
     assert_eq!(all.total.load(Ordering::Relaxed), 3);
     assert_eq!(all.done.load(Ordering::Relaxed), 3);
 
     // With a filter, the total reflects only the entries actually searched.
     let filtered = CountProgress::default();
-    let only_db = EntryFilter::new(&["*.db".to_string()], &[], false);
-    search_with_progress(&zip, &re, false, &only_db, &filtered).unwrap();
+    let only_db = EntryFilter::new(&["*.db".to_string()], &[], &[], false);
+    search_with_progress(&zip, &re, false, false, &only_db, &filtered).unwrap();
     assert_eq!(filtered.total.load(Ordering::Relaxed), 1);
     assert_eq!(filtered.done.load(Ordering::Relaxed), 1);
 }
