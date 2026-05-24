@@ -1,13 +1,12 @@
 [package]
 name = "mf-zipgrep"
 version = "0.1.0"
-edition = "2024"
+edition = "2026"
 description = "Fast, forensic-aware regex search inside mobile-acquisition ZIP archives."
 keywords = ["forensics", "zip", "grep", "search", "mobile"]
 categories = ["command-line-utilities", "filesystem"]
 license = "Apache-2.0"
-# TODO before publishing to crates.io: set the repository URL once the repo exists.
-# repository = "https://github.com/<you>/mf-zipgrep"
+repository = "https://github.com/Ben0x0a/MobileForensic-zipgrep"
 
 [dependencies]
 anyhow = "1.0.102"
