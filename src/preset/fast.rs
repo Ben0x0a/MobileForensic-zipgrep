@@ -3,12 +3,12 @@
 //! Defines: `FAST_EXCLUDE_GLOBS`, the editable list of path globs that `--fast`
 //! skips, on top of the always-on speed options.
 //! Used by: `main` (when `--fast` is set, these globs are added to the filter's
-//! excludes).
+//! excludes, and media is excluded).
 //! Uses: nothing.
 //!
-//! What `--fast` does today: skip media files (already the default) + use all
-//! CPU cores (already the default) + skip the path globs listed below. As the
-//! preset grows, add more here.
+//! What `--fast` does today: excludes media files (which are searched by
+//! default), uses all CPU cores (already the default), and skips the path globs
+//! listed below. As the preset grows, add more here.
 //!
 //! ── Customising the preset ──────────────────────────────────────────────────
 //! Edit `FAST_EXCLUDE_GLOBS` to tune what `--fast` treats as noise. Each entry is
@@ -17,8 +17,8 @@
 //! kept here, in one obvious place, so it is easy to extend without touching the
 //! search logic. For one-off exclusions, prefer `--not-path` on the command line.
 //!
-//! Kept intentionally empty for now (so `--fast` == skip-media + multithread).
-//! Examples you might add as you identify reliably-noisy locations:
+//! Kept intentionally empty for now (so `--fast` == exclude-media + multithread).
+//! Examples that may be added as reliably-noisy locations are identified:
 //!   "*/Caches/*", "*/tmp/*", "*.log"
 
 /// Path globs skipped by `--fast`, in addition to the always-on speed options.
