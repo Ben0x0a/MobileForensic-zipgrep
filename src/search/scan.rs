@@ -1,31 +1,20 @@
-//! Byte-level regex search over an entry's data (STORED or DEFLATE).
+//! Match scanning: run a byte regex and build a readable line preview per match.
 //!
-//! Defines: `search_entry`, which runs a compiled byte regex against one
-//! entry's logical content and reports each match together with its enclosing
-//! line and the match's position within that line.
-//! Used by: `main.rs` (orchestration).
-//! Uses: `crate::models::{Entry, Method, SearchHit}` (data shapes),
-//! `regex::bytes` (the search engine), `flate2` (DEFLATE decompression),
-//! `anyhow` (errors).
+//! Defines: `search_bytes` (one `SearchHit` per match) plus the private
+//! `preview`/`line_bounds` helpers and the preview-size constants.
+//! Used by: `search::search_entry`, `engine`.
+//! Uses: `regex::bytes` (the engine), `crate::models::SearchHit`.
 //!
 //! Why `regex::bytes` rather than `regex` on `&str`: forensic data is arbitrary
 //! bytes (mixed encodings, binary blobs), so matching must happen on `&[u8]` —
-//! decoding to UTF-8 first would either fail or corrupt the data. For the same
-//! reason, this module hands back raw line bytes and lets the caller render.
-//!
-//! STORED entries are searched in place over the memory-mapped archive (no
-//! copy); DEFLATE entries are decompressed into an owned buffer first, so their
-//! reported offsets are positions within the *decompressed* stream.
+//! decoding to UTF-8 first would either fail or corrupt the data. Raw line bytes
+//! are handed back so the caller can render (and colourise) them.
 
-use std::borrow::Cow;
-use std::io::Read;
 use std::ops::Range;
 
-use anyhow::{Context, Result};
-use flate2::read::DeflateDecoder;
 use regex::bytes::Regex;
 
-use crate::models::{Entry, Method, SearchHit};
+use crate::models::SearchHit;
 
 /// Maximum preview length (bytes) of the line shown for a match.
 ///
@@ -37,48 +26,6 @@ const MAX_PREVIEW: usize = 200;
 
 /// Unicode horizontal ellipsis (U+2026) marking a truncated line edge.
 const ELLIPSIS: &[u8] = "…".as_bytes();
-
-/// Return an entry's logical content: a borrowed slice of the archive for
-/// STORED, or an owned decompressed buffer for DEFLATE.
-///
-/// Exposed so callers (the engine) can search *and* inspect the same content
-/// without decompressing a DEFLATE entry twice.
-pub fn entry_content<'a>(archive: &'a [u8], entry: &Entry) -> Result<Cow<'a, [u8]>> {
-    let start = entry.data_offset as usize;
-    let end = start + entry.data_len as usize;
-    // A data range outside the file means the Central Directory disagreed with
-    // the archive's real size; bailing here surfaces a corrupt/truncated image
-    // rather than silently searching the wrong bytes.
-    let raw = archive
-        .get(start..end)
-        .with_context(|| format!("data range of {} is out of bounds", entry.name))?;
-
-    match entry.method {
-        Method::Stored => Ok(Cow::Borrowed(raw)),
-        Method::Deflate => {
-            let inflated = inflate(raw, entry.uncompressed_size)
-                .with_context(|| format!("failed to inflate {}", entry.name))?;
-            Ok(Cow::Owned(inflated))
-        }
-    }
-}
-
-/// Search one entry for every (non-overlapping) match of `re`.
-pub fn search_entry(archive: &[u8], entry: &Entry, re: &Regex) -> Result<Vec<SearchHit>> {
-    let content = entry_content(archive, entry)?;
-    Ok(search_bytes(&content, re))
-}
-
-/// Inflate a raw DEFLATE stream (ZIP method 8 stores no zlib header).
-///
-/// `expected_size` is only a capacity hint to avoid reallocations; the decoder
-/// reads to the end of the stream regardless.
-fn inflate(compressed: &[u8], expected_size: u64) -> Result<Vec<u8>> {
-    let mut decoder = DeflateDecoder::new(compressed);
-    let mut out = Vec::with_capacity(expected_size as usize);
-    decoder.read_to_end(&mut out)?;
-    Ok(out)
-}
 
 /// Run the regex over a haystack, producing one hit per match.
 pub fn search_bytes(haystack: &[u8], re: &Regex) -> Vec<SearchHit> {
