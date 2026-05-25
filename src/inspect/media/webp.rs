@@ -3,6 +3,6 @@
 
 use super::media_inspector;
 
-media_inspector!(Webp, "webp", "media", ["webp"], |c: &[u8]| crate::inspect::riff_form(
-    c, b"WEBP"
-));
+media_inspector!(Webp, "webp", "media", ["webp"], |c: &[u8]| {
+    crate::inspect::riff_form(c, b"WEBP")
+});

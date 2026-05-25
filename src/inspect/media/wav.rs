@@ -3,6 +3,6 @@
 
 use super::media_inspector;
 
-media_inspector!(Wav, "wav", "media", ["wav"], |c: &[u8]| crate::inspect::riff_form(
-    c, b"WAVE"
-));
+media_inspector!(Wav, "wav", "media", ["wav"], |c: &[u8]| {
+    crate::inspect::riff_form(c, b"WAVE")
+});

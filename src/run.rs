@@ -158,7 +158,10 @@ pub(crate) fn run_search(cli: SearchArgs) -> Result<()> {
         ignore_case: cli.ignore_case,
         match_path: cli.match_path,
         inspect: cli.inspect,
-        archives: sources.iter().map(|s| s.path.display().to_string()).collect(),
+        archives: sources
+            .iter()
+            .map(|s| s.path.display().to_string())
+            .collect(),
         path_globs: cli.path.clone(),
         not_path_globs: cli.not_path.clone(),
         types: cli.file_type.clone(),
@@ -194,7 +197,8 @@ pub(crate) fn run_search(cli: SearchArgs) -> Result<()> {
         for src in &sources {
             let mmap = open_archive(&src.path)?;
             let verify_before = cli.verify.then(|| sha256_hex(&mmap));
-            let mut findings = search_with_reporter(&mmap, &re, cli.inspect, cli.match_path, &filter)?;
+            let mut findings =
+                search_with_reporter(&mmap, &re, cli.inspect, cli.match_path, &filter)?;
             // Every record carries its source archive's full path (for JSON);
             // multi-archive runs also get the short display label (for txt/csv).
             let full = src.path.display().to_string();
@@ -422,7 +426,10 @@ fn export_if_requested(
                 ..
             } => {
                 write_export_report_file(dir, run, &report)?;
-                eprintln!("exported {files} files ({bytes} bytes) to {}", dir.display());
+                eprintln!(
+                    "exported {files} files ({bytes} bytes) to {}",
+                    dir.display()
+                );
             }
             ExportOutcome::Refused { total_size, cap } => {
                 eprintln!(
@@ -448,7 +455,11 @@ fn write_export_report_file(
     let mut w = BufWriter::new(file);
     export::write_export_report(run, report, &mut w)?;
     w.flush().context("failed flushing export report")?;
-    eprintln!("export report: {} files -> {}", report.len(), path.display());
+    eprintln!(
+        "export report: {} files -> {}",
+        report.len(),
+        path.display()
+    );
     Ok(())
 }
 

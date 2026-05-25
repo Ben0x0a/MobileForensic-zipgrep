@@ -3,4 +3,5 @@
 
 use super::media_inspector;
 
-media_inspector!(Bmp, "bmp", "media", ["bmp"], |c: &[u8]| c.starts_with(b"BM"));
+media_inspector!(Bmp, "bmp", "media", ["bmp"], |c: &[u8]| c
+    .starts_with(b"BM"));

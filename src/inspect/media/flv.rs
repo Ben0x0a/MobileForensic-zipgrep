@@ -3,4 +3,5 @@
 
 use super::media_inspector;
 
-media_inspector!(Flv, "flv", "media", ["flv"], |c: &[u8]| c.starts_with(b"FLV"));
+media_inspector!(Flv, "flv", "media", ["flv"], |c: &[u8]| c
+    .starts_with(b"FLV"));

@@ -3,5 +3,6 @@
 
 use super::media_inspector;
 
-media_inspector!(Opus, "opus", "media", ["opus"], |c: &[u8]| c.starts_with(b"OggS")
+media_inspector!(Opus, "opus", "media", ["opus"], |c: &[u8]| c
+    .starts_with(b"OggS")
     && crate::inspect::contains(&c[..c.len().min(128)], b"OpusHead"));

@@ -3,6 +3,6 @@
 
 use super::media_inspector;
 
-media_inspector!(Avi, "avi", "media", ["avi"], |c: &[u8]| crate::inspect::riff_form(
-    c, b"AVI "
-));
+media_inspector!(Avi, "avi", "media", ["avi"], |c: &[u8]| {
+    crate::inspect::riff_form(c, b"AVI ")
+});

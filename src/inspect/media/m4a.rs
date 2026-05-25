@@ -3,7 +3,6 @@
 
 use super::media_inspector;
 
-media_inspector!(M4a, "m4a", "media", ["m4a"], |c: &[u8]| crate::inspect::ftyp_brand(
-    c,
-    &[b"M4A ", b"M4B "]
-));
+media_inspector!(M4a, "m4a", "media", ["m4a"], |c: &[u8]| {
+    crate::inspect::ftyp_brand(c, &[b"M4A ", b"M4B "])
+});

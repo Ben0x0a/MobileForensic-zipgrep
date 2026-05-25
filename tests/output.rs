@@ -47,7 +47,7 @@ fn sample() -> Vec<MatchRecord> {
     vec![
         MatchRecord {
             archive: None,
-        archive_path: None,
+            archive_path: None,
             path: "sub/b.log".into(),
             file_start: 100,
             file_offset: 17,
@@ -59,7 +59,7 @@ fn sample() -> Vec<MatchRecord> {
         },
         MatchRecord {
             archive: None,
-        archive_path: None,
+            archive_path: None,
             path: "a.txt".into(),
             file_start: 200,
             file_offset: 12,

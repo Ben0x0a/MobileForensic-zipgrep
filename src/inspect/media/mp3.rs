@@ -3,5 +3,6 @@
 
 use super::media_inspector;
 
-media_inspector!(Mp3, "mp3", "media", ["mp3"], |c: &[u8]| c.starts_with(b"ID3")
+media_inspector!(Mp3, "mp3", "media", ["mp3"], |c: &[u8]| c
+    .starts_with(b"ID3")
     || (c.len() >= 2 && c[0] == 0xFF && (c[1] & 0xE0) == 0xE0));

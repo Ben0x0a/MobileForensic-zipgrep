@@ -3,4 +3,5 @@
 
 use super::media_inspector;
 
-media_inspector!(Flac, "flac", "media", ["flac"], |c: &[u8]| c.starts_with(b"fLaC"));
+media_inspector!(Flac, "flac", "media", ["flac"], |c: &[u8]| c
+    .starts_with(b"fLaC"));

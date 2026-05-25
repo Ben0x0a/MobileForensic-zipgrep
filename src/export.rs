@@ -90,7 +90,10 @@ pub enum ExportOutcome {
 
 /// SHA-256 of `bytes` as lowercase hex.
 fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The export report: the run metadata plus every written file and its hash.
@@ -210,7 +213,8 @@ pub fn export_files(
 
         // Sidecars to export come from the file's inspector (e.g. SQLite's -wal).
         let suffixes = crate::inspect::sidecars_for(&file.entry.name, &content);
-        let mut sidecars = export_sidecars(archive, &by_path, &file.entry.name, &dest, dir, suffixes)?;
+        let mut sidecars =
+            export_sidecars(archive, &by_path, &file.entry.name, &dest, dir, suffixes)?;
         bytes += sidecars.iter().map(|f| f.size).sum::<u64>();
         report.append(&mut sidecars);
     }
@@ -271,8 +275,14 @@ pub fn export_from_manifest(
         report.push(exported_file(&entry.internal_path, &dest, dir, &content));
 
         let suffixes = crate::inspect::sidecars_for(&entry.internal_path, &content);
-        let mut sidecars =
-            export_sidecars(archive, &by_path, &entry.internal_path, &dest, dir, suffixes)?;
+        let mut sidecars = export_sidecars(
+            archive,
+            &by_path,
+            &entry.internal_path,
+            &dest,
+            dir,
+            suffixes,
+        )?;
         bytes += sidecars.iter().map(|f| f.size).sum::<u64>();
         report.append(&mut sidecars);
     }

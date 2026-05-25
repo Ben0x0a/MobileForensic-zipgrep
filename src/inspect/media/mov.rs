@@ -3,7 +3,6 @@
 
 use super::media_inspector;
 
-media_inspector!(Mov, "mov", "media", ["mov"], |c: &[u8]| crate::inspect::ftyp_brand(
-    c,
-    &[b"qt  "]
-));
+media_inspector!(Mov, "mov", "media", ["mov"], |c: &[u8]| {
+    crate::inspect::ftyp_brand(c, &[b"qt  "])
+});

@@ -3,4 +3,5 @@
 
 use super::media_inspector;
 
-media_inspector!(Caf, "caf", "media", ["caf"], |c: &[u8]| c.starts_with(b"caff"));
+media_inspector!(Caf, "caf", "media", ["caf"], |c: &[u8]| c
+    .starts_with(b"caff"));

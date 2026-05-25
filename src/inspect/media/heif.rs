@@ -3,7 +3,11 @@
 
 use super::media_inspector;
 
-media_inspector!(Heif, "heif", "media", ["heic", "heif"], |c: &[u8]| crate::inspect::ftyp_brand(
-    c,
-    &[b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"heif"]
-));
+media_inspector!(Heif, "heif", "media", ["heic", "heif"], |c: &[u8]| {
+    crate::inspect::ftyp_brand(
+        c,
+        &[
+            b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"heif",
+        ],
+    )
+});
