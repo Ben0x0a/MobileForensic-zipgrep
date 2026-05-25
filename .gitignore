@@ -92,3 +92,7 @@ $RECYCLE.BIN/
 .llms/
 .prompts.local/
 .chatgpt/
+
+# Local planning notes (not part of the published project)
+docs/roadmap.md
+ROADMAP.local.md

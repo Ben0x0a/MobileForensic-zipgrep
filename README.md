@@ -33,8 +33,8 @@ private/var/.../CellularUsage.db:0x1f4a:...IMSI 208...
 - **Export matched files out** with a re-ingestable manifest and a size cap.
 - **Multi-threaded**, with a live progress hint on a terminal.
 
-> Status: **v1**. Some inspectors (ABX, SEGB) are still planned — see
-> [docs/roadmap.md](docs/roadmap.md).
+> Additional inspectors (ABX, SEGB) are planned for a future version; see
+> [docs/inspectors.md](docs/inspectors.md).
 
 ---
 
@@ -56,7 +56,7 @@ cargo build --release
 mf-zipgrep search 'secret' case.zip
 
 # Case-insensitive, literal (not a regex)
-mf-zipgrep search -i -F 'O2 UK' case.zip
+mf-zipgrep search -i -l 'O2 UK' case.zip
 
 # Restrict to certain files, and resolve matches inside them
 mf-zipgrep search 'token' case.zip --path '*.sqlite' --path '*.plist' --inspect
@@ -100,24 +100,24 @@ repeated, and with `-r` a directory argument is searched recursively for its
 | Flag | Meaning |
 |---|---|
 | `-i`, `--ignore-case` | Case-insensitive matching. |
-| `-F`, `--fixed-strings` | Treat PATTERN as a literal string, not a regex. |
+| `-l`, `--literal-string` | Treat PATTERN as a literal string, not a regex (alias: `--fixed-strings`). |
 | `-E`, `--extended-regexp` | Accepted for grep muscle memory; no-op (the engine is already ERE-like). |
 | `-r`, `--recursive` | Search directory arguments recursively for `*.zip` files. |
 | `--path GLOB` | Only search files whose internal path matches the wildcard. Repeatable. |
 | `--not-path GLOB` | Skip files matching the wildcard (takes precedence over `--path`). Repeatable. |
-| `--type TYPE` | Only search files of a format (`sqlite`, `jpeg`, …) or category (`media`, `database`, `structured`, `text`). Header-first, then extension. Repeatable. |
+| `-t`, `--type TYPE` | Only search files of a format (`sqlite`, `jpeg`, …) or category (`media`, `database`, `structured`, `text`). Header-first, then extension. Repeatable. |
 | `--match-path` | Match the PATTERN against each file's internal path instead of its content; list the files whose path matches (no content is read). |
-| `--include-media` | Search image/video/audio files too (skipped by default — see below). |
-| `--fast` | Speed preset: skip media + all cores + a customisable exclude list (`src/fast.rs`). |
+| `--exclude-media` | Skip image/video/audio files (searched by default — see below). |
+| `--fast` | Speed preset: exclude media + all cores + a customisable exclude list (`src/preset/fast.rs`). |
 | `--inspect` | Resolve matches inside recognised formats (see [Inspection](#deep-inspection)). |
 | `-c`, `--count` | Print only the match count per file (one line per file). |
-| `--format txt\|json\|csv` | Output format (default `txt`). |
+| `-f`, `--format txt\|json\|csv` | Output format (default `txt`). |
 | `-o`, `--output FILE` | Write results to a file instead of stdout. |
 | `--colour[=auto\|always\|never]` | Highlight matches (txt to a terminal). `--color` also accepted. |
 | `-j`, `--threads N` | Search threads (default: one per CPU core). |
 | `--manifest FILE` | Write a re-ingestable manifest of matched files (+ total size). |
-| `--export DIR` | Also copy matched files out, in one step. |
-| `--max-size SIZE` | Refuse to export if the matched total exceeds SIZE (e.g. `200MB`, `1G`). |
+| `--export DIR` | Also copy matched files out, in one step. Writes `DIR/export-report.json` (run metadata + each file's SHA-256). |
+| `--max-size SIZE` | Refuse to export if the matched total exceeds SIZE (e.g. `200MB`, `1G`). Default `1G` as an accident guard. |
 | `--verify` | SHA-256 the archive before and after the run; report whether it changed (integrity attestation). |
 
 ### `export`
@@ -152,8 +152,9 @@ sms.db:0x500000                                  (binary: location only)
 sms.db:0x500000  [sqlite  table: message  column: text  row: 4213  cell: hello there]
 ```
 
-`json` emits a single array of objects; `csv` a header row plus one row per
-match (offsets are decimal there). See
+`json` emits a `{ run, results }` object — the query and filters, then one object
+per match; `csv` emits a header row plus one row per match. Offsets are `0x…` hex
+in every format. See
 [docs/output-and-offsets.md](docs/output-and-offsets.md) for the full schema.
 
 ### Offsets
@@ -192,8 +193,8 @@ For a SQLite **BLOB** cell, the blob's own signature is checked and, if it is a
 recognised format (e.g. an embedded `bplist`), that inspector resolves it too —
 so a match reads `column: payload [BLOB] … blob: bplist  key: $.Account.Servers`.
 
-See [docs/inspectors.md](docs/inspectors.md) for details and [docs/roadmap.md](docs/roadmap.md)
-for planned formats (ABX, SEGB).
+See [docs/inspectors.md](docs/inspectors.md) for details and the formats planned
+for a future version (ABX, SEGB).
 
 ---
 
@@ -203,7 +204,6 @@ for planned formats (ABX, SEGB).
 - [docs/workflow.md](docs/workflow.md) — forensic workflows end to end.
 - [docs/output-and-offsets.md](docs/output-and-offsets.md) — output formats, offsets, inspection schema.
 - [docs/inspectors.md](docs/inspectors.md) — supported formats, detection, adding one.
-- [docs/roadmap.md](docs/roadmap.md) — planned features.
 
 ---
 
@@ -217,12 +217,12 @@ for planned formats (ABX, SEGB).
 - Long "lines" in binary files are capped to a window around the match for
   display; the reported offsets are exact regardless.
 - Search is case-sensitive unless `-i`; `--path`/`--not-path` matching is case-sensitive.
-- **Media files (images/video/audio) are skipped by default** — they hold no
-  searchable text and dominate acquisition size. Use `--include-media` to search
-  them (e.g. to scan for text embedded in a file mislabelled as media).
+- **All files are searched by default**, including media — completeness is the
+  forensic default, so nothing is silently skipped. `--exclude-media` (or `--fast`)
+  skips image/video/audio for speed when text content is the only target.
 
 ---
 
 ## License
 
-Not yet chosen — see the TODO in `Cargo.toml` before publishing.
+Licensed under the [Apache License, Version 2.0](LICENSE).
