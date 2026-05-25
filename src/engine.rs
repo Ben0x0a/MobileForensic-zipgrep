@@ -180,6 +180,7 @@ fn match_entry_path(entry: &Entry, re: &Regex) -> (Vec<MatchRecord>, Option<Matc
     };
     let record = MatchRecord {
         archive: None,
+        archive_path: None,
         path: entry.name.clone(),
         file_start: entry.data_offset,
         file_offset: 0,

@@ -25,7 +25,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::models::MatchRecord;
+use crate::models::{MatchRecord, RunInfo};
 
 // ANSI escapes for match highlighting: bold red on, all attributes off. Bytes
 // are plain ASCII, so they splice into raw line bytes safely.
@@ -66,11 +66,12 @@ pub fn write_results(
     format: OutputFormat,
     colourise: bool,
     path_match: bool,
+    run: &RunInfo,
     w: &mut dyn Write,
 ) -> Result<()> {
     match format {
         OutputFormat::Txt => write_txt(records, colourise, path_match, w),
-        OutputFormat::Json => write_json(records, w),
+        OutputFormat::Json => write_json(run, records, w),
         OutputFormat::Csv => write_csv(records, w),
     }
 }
@@ -96,17 +97,24 @@ fn textual_line(r: &MatchRecord) -> Option<Cow<'_, str>> {
     is_textual(&r.line).then(|| String::from_utf8_lossy(&r.line))
 }
 
-/// JSON projection: `line` appears only for textual matches; `format`/`context`
-/// only when the match was inspected (`--inspect`).
+/// Format a byte offset as `0x…` hex — how analysts read offsets, and used for
+/// every offset in every machine-readable format (not just txt).
+fn hex(n: u64) -> String {
+    format!("0x{n:x}")
+}
+
+/// JSON projection: offsets are `0x…` hex strings; `archive` is the source's full
+/// path; `line` appears only for textual matches; `format`/`context` only when
+/// the match was inspected (`--inspect`).
 #[derive(Serialize)]
 struct JsonView<'a> {
-    /// Source archive, present only when several archives were searched.
+    /// Full filesystem path of the source archive this result came from.
     #[serde(skip_serializing_if = "Option::is_none")]
     archive: Option<&'a str>,
     path: &'a str,
-    file_start: u64,
-    file_offset: u64,
-    archive_offset: u64,
+    file_start: String,
+    file_offset: String,
+    archive_offset: String,
     /// True for DEFLATE entries, where `archive_offset` is the blob start.
     compressed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,11 +128,11 @@ struct JsonView<'a> {
 impl<'a> From<&'a MatchRecord> for JsonView<'a> {
     fn from(r: &'a MatchRecord) -> Self {
         Self {
-            archive: r.archive.as_deref(),
+            archive: r.archive_path.as_deref(),
             path: &r.path,
-            file_start: r.file_start,
-            file_offset: r.file_offset,
-            archive_offset: r.archive_offset,
+            file_start: hex(r.file_start),
+            file_offset: hex(r.file_offset),
+            archive_offset: hex(r.archive_offset),
             compressed: r.compressed,
             format: r.inspection.as_ref().map(|i| i.format.as_str()),
             context: r.inspection.as_ref().map(|i| &i.detail),
@@ -133,16 +141,26 @@ impl<'a> From<&'a MatchRecord> for JsonView<'a> {
     }
 }
 
-/// CSV projection: flat, fixed columns (so the column set never varies).
-/// `format`/`context` are empty unless inspected; `line` is empty for binary.
+/// A complete JSON report: the run metadata plus the result records. The CLI's
+/// JSON output uses this so the file is self-describing (which archives, pattern,
+/// and filters produced it).
+#[derive(Serialize)]
+struct JsonReport<'a> {
+    run: &'a RunInfo,
+    results: Vec<JsonView<'a>>,
+}
+
+/// CSV projection: flat, fixed columns (so the column set never varies). Offsets
+/// are `0x…` hex strings. `format`/`context` are empty unless inspected; `line`
+/// is empty for binary.
 #[derive(Serialize)]
 struct CsvView<'a> {
-    /// Source archive (empty unless several archives were searched).
+    /// Source archive label (empty unless several archives were searched).
     archive: &'a str,
     path: &'a str,
-    file_start: u64,
-    file_offset: u64,
-    archive_offset: u64,
+    file_start: String,
+    file_offset: String,
+    archive_offset: String,
     compressed: bool,
     format: &'a str,
     context: &'a str,
@@ -154,9 +172,9 @@ impl<'a> From<&'a MatchRecord> for CsvView<'a> {
         Self {
             archive: r.archive.as_deref().unwrap_or(""),
             path: &r.path,
-            file_start: r.file_start,
-            file_offset: r.file_offset,
-            archive_offset: r.archive_offset,
+            file_start: hex(r.file_start),
+            file_offset: hex(r.file_offset),
+            archive_offset: hex(r.archive_offset),
             compressed: r.compressed,
             format: r.inspection.as_ref().map_or("", |i| i.format.as_str()),
             context: r.inspection.as_ref().map_or("", |i| i.summary.as_str()),
@@ -248,10 +266,14 @@ pub fn write_counts(
     }
 }
 
-/// json: a single pretty-printed array of record objects (re-ingestable).
-fn write_json(records: &[MatchRecord], w: &mut dyn Write) -> Result<()> {
-    let views: Vec<JsonView> = records.iter().map(JsonView::from).collect();
-    serde_json::to_writer_pretty(&mut *w, &views).context("failed writing JSON output")?;
+/// json: a single pretty-printed `{ run, results }` object — the run metadata
+/// (archives, pattern, filters) followed by one object per match.
+fn write_json(run: &RunInfo, records: &[MatchRecord], w: &mut dyn Write) -> Result<()> {
+    let report = JsonReport {
+        run,
+        results: records.iter().map(JsonView::from).collect(),
+    };
+    serde_json::to_writer_pretty(&mut *w, &report).context("failed writing JSON output")?;
     writeln!(w).context("failed writing JSON output")?;
     Ok(())
 }

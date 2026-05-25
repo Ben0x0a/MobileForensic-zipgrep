@@ -12,10 +12,10 @@
 
 pub mod engine;
 pub mod export;
-pub mod fast;
 pub mod filter;
 pub mod inspect;
 pub mod models;
 pub mod output;
+pub mod preset;
 pub mod search;
 pub mod zip;

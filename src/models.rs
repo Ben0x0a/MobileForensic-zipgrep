@@ -12,6 +12,42 @@
 
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
+/// Run-level metadata: the tool, the query, and every filter in effect.
+///
+/// Recorded so machine-readable output and the export manifest/report are
+/// self-describing — a result file states exactly which archives, pattern, and
+/// filters produced it. Embedded in JSON output, the manifest, and the export
+/// report; never shown in txt/csv (which stay line-oriented).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunInfo {
+    /// Tool name (`mf-zipgrep`).
+    pub tool: String,
+    /// Tool version (`CARGO_PKG_VERSION`).
+    pub version: String,
+    /// The pattern as given on the command line.
+    pub pattern: String,
+    /// Pattern was treated as a literal string (`-l`), not a regex.
+    pub literal: bool,
+    /// Case-insensitive matching (`-i`).
+    pub ignore_case: bool,
+    /// Pattern was matched against file paths, not content (`--match-path`).
+    pub match_path: bool,
+    /// Deep inspection was on (`--inspect`).
+    pub inspect: bool,
+    /// Source archives, as full filesystem paths.
+    pub archives: Vec<String>,
+    /// `--path` include globs.
+    pub path_globs: Vec<String>,
+    /// `--not-path` exclude globs.
+    pub not_path_globs: Vec<String>,
+    /// `--type` format/category allowlist.
+    pub types: Vec<String>,
+    /// Media files were excluded (`--exclude-media` or `--fast`).
+    pub exclude_media: bool,
+}
+
 /// Compression method of a searchable entry.
 ///
 /// Only the two methods that appear in mobile-forensic archives are modelled;
@@ -84,9 +120,12 @@ pub struct SearchHit {
 /// `serde_json::Value`, which is only `PartialEq` (it may hold floats).
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchRecord {
-    /// Source archive, set only when more than one archive is searched in a run
-    /// (so single-archive output is unchanged).
+    /// Source archive display label, set only when more than one archive is
+    /// searched in a run (so single-archive txt/csv output is unchanged).
     pub archive: Option<String>,
+    /// Full filesystem path of the source archive, set for every record. Used by
+    /// JSON output so each result names its origin; txt/csv use `archive`.
+    pub archive_path: Option<String>,
     /// File name and path inside the archive.
     pub path: String,
     pub file_start: u64,
@@ -118,6 +157,7 @@ impl MatchRecord {
         };
         Self {
             archive: None,
+            archive_path: None,
             path: entry.name.clone(),
             file_start: entry.data_offset,
             file_offset: hit.offset,

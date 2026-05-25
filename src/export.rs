@@ -27,9 +27,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::engine::MatchedFile;
-use crate::models::{Entry, Method};
+use crate::models::{Entry, Method, RunInfo};
 use crate::{search, zip};
 
 /// Number of hex characters (4 bits each) of the path hash in a folder name.
@@ -59,6 +60,18 @@ pub struct ExportPlan {
     pub total_size: u64,
 }
 
+/// One exported file recorded with its integrity hash, for the export report.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExportedFile {
+    /// Path inside the source archive.
+    pub internal_path: String,
+    /// Path written, relative to the export destination directory.
+    pub output_path: String,
+    pub size: u64,
+    /// SHA-256 of the written bytes, lowercase hex.
+    pub sha256: String,
+}
+
 /// The result of an export attempt.
 pub enum ExportOutcome {
     Exported {
@@ -66,11 +79,38 @@ pub enum ExportOutcome {
         bytes: u64,
         /// Manifest entries whose file was not found in the archive (re-ingest).
         skipped: usize,
+        /// Each written file with its SHA-256 (main files and sidecars).
+        report: Vec<ExportedFile>,
     },
     Refused {
         total_size: u64,
         cap: u64,
     },
+}
+
+/// SHA-256 of `bytes` as lowercase hex.
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The export report: the run metadata plus every written file and its hash.
+#[derive(Serialize)]
+struct ExportReport<'a> {
+    run: &'a RunInfo,
+    file_count: usize,
+    files: &'a [ExportedFile],
+}
+
+/// Write the export report (run metadata + per-file SHA-256) as JSON.
+pub fn write_export_report(run: &RunInfo, files: &[ExportedFile], w: &mut dyn Write) -> Result<()> {
+    let report = ExportReport {
+        run,
+        file_count: files.len(),
+        files,
+    };
+    serde_json::to_writer_pretty(&mut *w, &report).context("failed writing export report")?;
+    writeln!(w).context("failed writing export report")?;
+    Ok(())
 }
 
 /// Build an export plan from the matched files (one item per file, in order).
@@ -113,8 +153,13 @@ pub fn plan(files: &[MatchedFile]) -> ExportPlan {
 }
 
 /// Write the plan as a re-ingestable JSON manifest.
-pub fn write_manifest(plan: &ExportPlan, w: &mut dyn Write) -> Result<()> {
+///
+/// `run` records the query and filters (and the source archive paths) at the
+/// head of the manifest, so it documents what produced it; it is informational
+/// when the manifest is later re-ingested against a different archive.
+pub fn write_manifest(plan: &ExportPlan, run: &RunInfo, w: &mut dyn Write) -> Result<()> {
     let manifest = Manifest {
+        run: run.clone(),
         total_size: plan.total_size,
         file_count: plan.items.len(),
         files: plan.items.iter().map(ManifestEntry::from).collect(),
@@ -149,7 +194,7 @@ pub fn export_files(
     let entries = zip::parse_entries(archive)?;
     let by_path: HashMap<&str, &Entry> = entries.iter().map(|e| (e.name.as_str(), e)).collect();
 
-    let mut exported = 0usize;
+    let mut report: Vec<ExportedFile> = Vec::new();
     let mut bytes = 0u64;
     for (item, file) in plan.items.iter().zip(files) {
         // Content is read (and decompressed for DEFLATE) once, here.
@@ -160,20 +205,21 @@ pub fn export_files(
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
         fs::write(&dest, &content).with_context(|| format!("cannot write {}", dest.display()))?;
-        exported += 1;
         bytes += content.len() as u64;
+        report.push(exported_file(&file.entry.name, &dest, dir, &content));
 
         // Sidecars to export come from the file's inspector (e.g. SQLite's -wal).
         let suffixes = crate::inspect::sidecars_for(&file.entry.name, &content);
-        let (sf, sb) = export_sidecars(archive, &by_path, &file.entry.name, &dest, suffixes)?;
-        exported += sf;
-        bytes += sb;
+        let mut sidecars = export_sidecars(archive, &by_path, &file.entry.name, &dest, dir, suffixes)?;
+        bytes += sidecars.iter().map(|f| f.size).sum::<u64>();
+        report.append(&mut sidecars);
     }
 
     Ok(ExportOutcome::Exported {
-        files: exported,
+        files: report.len(),
         bytes,
         skipped: 0,
+        report,
     })
 }
 
@@ -206,7 +252,7 @@ pub fn export_from_manifest(
     let entries = zip::parse_entries(archive)?;
     let by_path: HashMap<&str, &Entry> = entries.iter().map(|e| (e.name.as_str(), e)).collect();
 
-    let mut files = 0usize;
+    let mut report: Vec<ExportedFile> = Vec::new();
     let mut bytes = 0u64;
     let mut skipped = 0usize;
     for entry in &manifest.files {
@@ -221,24 +267,27 @@ pub fn export_from_manifest(
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
         fs::write(&dest, &content).with_context(|| format!("cannot write {}", dest.display()))?;
-        files += 1;
         bytes += content.len() as u64;
+        report.push(exported_file(&entry.internal_path, &dest, dir, &content));
 
         let suffixes = crate::inspect::sidecars_for(&entry.internal_path, &content);
-        let (sf, sb) = export_sidecars(archive, &by_path, &entry.internal_path, &dest, suffixes)?;
-        files += sf;
-        bytes += sb;
+        let mut sidecars =
+            export_sidecars(archive, &by_path, &entry.internal_path, &dest, dir, suffixes)?;
+        bytes += sidecars.iter().map(|f| f.size).sum::<u64>();
+        report.append(&mut sidecars);
     }
 
     Ok(ExportOutcome::Exported {
-        files,
+        files: report.len(),
         bytes,
         skipped,
+        report,
     })
 }
 
 /// Export a file's declared sidecars into the same folder as `main_dest` (e.g.
-/// `sms.db` → `sms.db-wal`), returning (count, bytes).
+/// `sms.db` → `sms.db-wal`), returning one [`ExportedFile`] (with hash) per
+/// sidecar written.
 ///
 /// The `suffixes` come from the file's inspector (see
 /// [`crate::inspect::sidecars_for`]); each one names a sibling entry to fetch if
@@ -249,15 +298,15 @@ fn export_sidecars(
     by_path: &HashMap<&str, &Entry>,
     internal_path: &str,
     main_dest: &Path,
+    dir: &Path,
     suffixes: &[&str],
-) -> Result<(usize, u64)> {
+) -> Result<Vec<ExportedFile>> {
     let main_name = main_dest
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    let mut files = 0usize;
-    let mut bytes = 0u64;
+    let mut written = Vec::new();
     for suffix in suffixes {
         let sidecar_path = format!("{internal_path}{suffix}");
         let Some(entry) = by_path.get(sidecar_path.as_str()) else {
@@ -267,10 +316,25 @@ fn export_sidecars(
         let mut dest = main_dest.to_path_buf();
         dest.set_file_name(format!("{main_name}{suffix}"));
         fs::write(&dest, &content).with_context(|| format!("cannot write {}", dest.display()))?;
-        files += 1;
-        bytes += content.len() as u64;
+        written.push(exported_file(&sidecar_path, &dest, dir, &content));
     }
-    Ok((files, bytes))
+    Ok(written)
+}
+
+/// Build an [`ExportedFile`] record: the destination path relative to the export
+/// directory, the size, and the SHA-256 of the written bytes.
+fn exported_file(internal_path: &str, dest: &Path, dir: &Path, content: &[u8]) -> ExportedFile {
+    let output_path = dest
+        .strip_prefix(dir)
+        .unwrap_or(dest)
+        .to_string_lossy()
+        .replace('\\', "/");
+    ExportedFile {
+        internal_path: internal_path.to_string(),
+        output_path,
+        size: content.len() as u64,
+        sha256: sha256_hex(content),
+    }
 }
 
 /// Join a manifest `output_path` under `dir`, dropping any `..`/empty/absolute
@@ -338,8 +402,12 @@ fn sanitise_basename(path: &str) -> String {
 }
 
 /// JSON manifest shape (re-ingestable).
+///
+/// `run` (the query, filters, and source archive paths) heads the manifest for
+/// documentation; the remaining fields drive re-ingestion.
 #[derive(Serialize, Deserialize)]
 pub struct Manifest {
+    pub run: RunInfo,
     pub total_size: u64,
     pub file_count: usize,
     pub files: Vec<ManifestEntry>,
