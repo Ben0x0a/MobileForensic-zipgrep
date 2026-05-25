@@ -7,13 +7,15 @@ binary is only argument parsing and I/O.
 ```
 src/
   lib.rs        library root (declares the modules below)
-  main.rs       BINARY: clap subcommands, mmap, progress reporter, I/O wiring
-  models.rs     data containers: Method, Entry, SearchHit, MatchRecord, Inspection
+  main.rs       BINARY entry point: parse args, dispatch to a subcommand
+  cli.rs        BINARY: clap argument structs (Cli/SearchArgs/ExportArgs) + size parser
+  run.rs        BINARY: run_search/run_export, mmap, progress reporter, I/O wiring
+  models.rs     data containers: Method, Entry, SearchHit, MatchRecord, Inspection, RunInfo
   zip.rs        ZIP central-directory parser (STORED + DEFLATE, ZIP64)
-  search.rs     per-entry byte search (regex::bytes) + DEFLATE inflate + line preview
+  search/       per-entry byte search: content.rs (STORED/DEFLATE) + scan.rs (regex + preview)
   engine.rs     orchestration: parse + parallel search (or --match-path) -> Findings
   filter.rs     EntryFilter: path globs (--path/--not-path) + --type / media skip
-  fast.rs       the --fast preset's customisable exclude list
+  preset/       behaviour presets behind one flag; fast.rs is the --fast exclude list
   inspect/      deep "what does this match mean" inspectors + file-type detection
     mod.rs        Inspector trait (name/category/detect/inspect) + registry +
                   detection (header-first) + detect_type (drives --type/skip-media)
@@ -24,34 +26,65 @@ src/
   export.rs     plan output paths, write manifest, export files (+ sidecars) to disk
 ```
 
+## Module dependencies
+
+The binary layer (`main`/`cli`/`run`) depends on the library; within the
+library, `engine` orchestrates the parser, search, filter, and inspectors, and
+every data type bottoms out in `models`.
+
+```mermaid
+flowchart TD
+    subgraph binary
+        main[main.rs] --> cli[cli.rs]
+        main --> run[run.rs]
+    end
+    subgraph library["library — mf_zipgrep"]
+        engine
+        zip
+        search
+        filter
+        inspect
+        output
+        export
+        preset
+        models
+    end
+    run --> engine
+    run --> output
+    run --> export
+    run --> filter
+    run --> preset
+    engine --> zip
+    engine --> search
+    engine --> filter
+    engine --> inspect
+    export --> inspect
+    export --> search
+    inspect --> models
+    search --> models
+    engine --> models
+    output --> models
+```
+
 ## Data flow
 
-```
-archive bytes (mmap)
-      │
-      ▼
- zip::parse_entries ──► Vec<Entry>            (central-directory walk, ZIP64)
-      │
-      ▼
- filter.selects(path) ──► entries to search   (--path/--not-path, path-only)
-      │
-      ▼  (rayon, in parallel, per entry)
- search::entry_content ─► STORED: borrow mmap slice
-                          DEFLATE: inflate into an owned buffer
-      │
-      ▼  inspect::detect_type (header-first) ─► filter.accepts_type
-      │                         (--type allowlist / media skip; drop if excluded)
-      │
-      ▼
- search::search_bytes  ─► Vec<SearchHit>  (offset, line preview, match span)
-      │                       │
-      │                       └─(--inspect)─► inspect::inspect ─► Inspection
-      ▼
- engine::Findings { records: Vec<MatchRecord>, files: Vec<MatchedFile> }
-      │                         │
-      ▼                         ▼
- output::write_results     export::plan ─► write_manifest / export_files
- (txt / json / csv)        (DIR/<basename>_<hash>/<basename>)
+The entries are selected first (path-only filter), then searched in parallel
+(rayon, one task per entry); the per-entry steps below run concurrently.
+
+```mermaid
+flowchart TD
+    A["archive bytes (mmap)"]
+    A --> B["zip::parse_entries — entries<br/>central-directory walk, ZIP64"]
+    B --> C["filter.selects(path)<br/>--path / --not-path (path-only)"]
+    C --> D["search::entry_content<br/>STORED: borrow slice · DEFLATE: inflate"]
+    D --> E{"inspect::detect_type (header-first)<br/>+ filter.accepts_type<br/>--type / media skip"}
+    E -->|excluded| Z["skip entry"]
+    E -->|kept| F["search::search_bytes — hits<br/>offset, line preview, match span"]
+    F -->|"--inspect"| G["inspect::inspect — Inspection"]
+    F --> H["engine::Findings<br/>records + files"]
+    G --> H
+    H --> I["output::write_results<br/>txt / json / csv"]
+    H --> J["export::plan — write_manifest / export_files<br/>DIR/&lt;basename&gt;_&lt;hash&gt;/…"]
 ```
 
 `engine::search_archive` produces **both** outputs in a single pass:
@@ -114,4 +147,5 @@ byte** (`tests/common`) so they are deterministic and need no external `zip`
 tool. Binary-format inspectors are tested against committed real fixtures
 (`tests/fixtures/`: a SQLite DB from `sqlite3`, a plist + bplist from `plutil`).
 
-`cargo test` runs 70+ tests; `cargo clippy --all-targets -- -D warnings` is clean.
+`cargo test` runs the full suite (lib unit tests + integration tests, ~80 in
+total); `cargo clippy --all-targets -- -D warnings` is clean.

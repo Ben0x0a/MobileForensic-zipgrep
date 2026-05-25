@@ -15,7 +15,7 @@ location only (no content); use `--inspect` to resolve them.
 
 Useful modifiers:
 
-- `-i` case-insensitive, `-F` literal (treat the pattern as plain text).
+- `-i` case-insensitive, `-l` literal (treat the pattern as plain text).
 - `--colour` to highlight the match (auto on a terminal).
 - `--path '*.db'` to limit the search to certain files (repeatable).
 
@@ -38,10 +38,10 @@ Exclude with `--not-path` (takes precedence over `--path`):
 mf-zipgrep search 'token' acquisition.zip --not-path '*Caches*' --not-path '*.log'
 ```
 
-**Media files (images/video/audio) are skipped by default** — they contain no
-searchable text and are most of an acquisition's size. Pass `--include-media` to
-search them anyway. Filtering happens before the search, so it also scopes what
-gets exported.
+**All files are searched by default**, including media. To skip image/video/audio
+for speed (they contain no searchable text and dominate an acquisition's size),
+pass `--exclude-media` (or `--fast`). Filtering happens before the search, so it
+also scopes what gets exported.
 
 ### Filter by file *type* (`--type`)
 
@@ -54,13 +54,13 @@ and a `.jpg` that is really a renamed database is not mistaken for an image:
 mf-zipgrep search 'token' acquisition.zip --type sqlite --inspect
 
 # A whole category: every image/video/audio file
-mf-zipgrep search -i 'secret' acquisition.zip --type media --include-media
+mf-zipgrep search -i 'secret' acquisition.zip --type media
 ```
 
 Values are format names (`sqlite`, `jpeg`, `plist`, …) or categories (`media`,
-`database`, `structured`, `text`); `--type` is repeatable. The default media skip
-is exactly `--type` excluding the `media` category. An explicit `--type` takes
-over from the skip, so `--type media` lists media even without `--include-media`.
+`database`, `structured`, `text`); `--type` is repeatable. `--exclude-media` is
+exactly `--type` excluding the `media` category. An explicit `--type` takes over
+from any media skip, so `--type media` lists media even alongside `--fast`.
 
 ### Find files by *path* (`--match-path`)
 
@@ -123,7 +123,7 @@ mf-zipgrep export acquisition.zip --from-manifest hits.json --to ./exported --ma
 
 ### One-step variant
 
-If you don't need the review step:
+When the review step is not needed:
 
 ```
 mf-zipgrep search 'private_key' acquisition.zip --export ./exported --max-size 1G --manifest hits.json
@@ -157,7 +157,7 @@ DIR/<basename>_<hash>/<basename>
   associations still work.
 - The folder is the basename plus a short, **stable** hash of the file's internal
   path — so the *same* logical file lands in the *same-named* folder across
-  different acquisitions, and you learn to recognise recurrent files.
+  different acquisitions, so recurrent files become recognisable.
 - Collisions are impossible by construction; in the rare event two paths hash the
   same, `_0x<offset>` is appended.
 

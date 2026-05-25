@@ -21,6 +21,8 @@ extension only decides formats that have no magic bytes (JSON, CSV, TXT).
 | JSON | — | `.json` |
 | CSV | — | `.csv` |
 | TXT | — | `.txt .log .text` |
+| ABX (Android Binary XML) | `ABX\0` *(coming in a future version)* | `.xml` |
+| SEGB (Apple record container) | record-container signature *(coming in a future version)* | — |
 
 A file that matches no inspector is reported as a plain match (no `context`).
 
@@ -133,7 +135,15 @@ appended to the file name, e.g. SQLite returns `["-wal", "-shm", "-journal"]`.
 `export` fetches them automatically (`inspect::sidecars_for`), so adding a format's
 sidecars is one line in its inspector — `export.rs` needs no change.
 
-## Planned
+## Coming in a future version
 
-ABX (Android Binary XML) and SEGB (Apple record container) are planned but need
-real sample files to implement reliably — see [roadmap.md](roadmap.md).
+Two inspectors are designed but not yet implemented, pending representative
+sample files to validate the binary parsers against:
+
+- **ABX** (Android Binary XML, e.g. `packages.xml`): magic `ABX\0`, a token
+  stream with an interned string pool; resolves to an element path like XML.
+- **SEGB** (Apple record container — KnowledgeC, biome, locationd): resolves a
+  match to the containing record (index and offset, plus record metadata).
+
+Both slot into the existing inspector framework — one new file each, registered
+in `INSPECTORS` — once committed fixtures exist in `tests/fixtures/`.

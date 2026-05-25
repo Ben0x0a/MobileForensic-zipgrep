@@ -64,22 +64,41 @@ sms.db:0x500000  [sqlite  table: message  column: text  row: 4213  cell: hello t
 
 ## json
 
-A single pretty-printed array. `line` appears only for textual matches;
-`format`/`context` only with `--inspect`. Offsets are decimal integers (valid
-JSON; use hex in txt for human reading):
+A single pretty-printed object with two members: `run` (the query and every
+filter in effect, so the file is self-describing) and `results` (one object per
+match). Offsets are `0x…` hex strings. `archive` is the source archive's full
+path; `line` appears only for textual matches; `format`/`context` only with
+`--inspect`.
 
 ```json
-[
-  {
-    "path": "private/var/.../sms.db",
-    "file_start": 4096,
-    "file_offset": 5242880,
-    "archive_offset": 4096,
-    "compressed": true,
-    "format": "sqlite",
-    "context": { "page": 1281, "table": "message", "rowid": 4213, "column": "text", "cell": "hello there" }
-  }
-]
+{
+  "run": {
+    "tool": "mf-zipgrep",
+    "version": "0.1.0",
+    "pattern": "hello",
+    "literal": false,
+    "ignore_case": false,
+    "match_path": false,
+    "inspect": true,
+    "archives": ["/cases/acquisition.zip"],
+    "path_globs": [],
+    "not_path_globs": [],
+    "types": ["sqlite"],
+    "exclude_media": false
+  },
+  "results": [
+    {
+      "archive": "/cases/acquisition.zip",
+      "path": "private/var/.../sms.db",
+      "file_start": "0x1000",
+      "file_offset": "0x500000",
+      "archive_offset": "0x1000",
+      "compressed": true,
+      "format": "sqlite",
+      "context": { "page": 1281, "table": "message", "rowid": 4213, "column": "text", "type": "TEXT", "cell": "hello there" }
+    }
+  ]
+}
 ```
 
 `context` is format-specific (see below). For binary formats the decoded value
@@ -94,9 +113,11 @@ A header row plus one row per match. Columns are fixed (so the set never varies)
 archive,path,file_start,file_offset,archive_offset,compressed,format,context,line
 ```
 
-`archive` is empty unless several archives were searched; `format`/`context` are
-empty unless `--inspect` matched; `line` is empty for binary files. `context` is
-the human labelled one-liner (the same text as the txt tag).
+Offsets are `0x…` hex strings. `archive` is the source archive's display label,
+empty unless several archives were searched (the full path is in json's `run`);
+`format`/`context` are empty unless `--inspect` matched; `line` is empty for
+binary files. `context` is the human labelled one-liner (the same text as the
+txt tag). Run metadata (pattern, filters) is not in csv; use json for that.
 
 ## counts (`--count`)
 
@@ -132,6 +153,7 @@ value — a TEXT/INTEGER/REAL value as text, a NULL as `NULL`, a BLOB as
 
 ```json
 {
+  "run": { "tool": "mf-zipgrep", "pattern": "private_key", "archives": ["/cases/acquisition.zip"], "...": "..." },
   "total_size": 412300191,
   "file_count": 37,
   "files": [
@@ -146,9 +168,35 @@ value — a TEXT/INTEGER/REAL value as text, a NULL as `NULL`, a BLOB as
 }
 ```
 
-- `total_size` is the sum of `size` over all matched files — known *before* you
+- `run` heads the manifest with the query, filters, and source archive paths, so
+  it documents what produced the manifest. It is informational on re-ingestion: a
+  manifest may be applied to a different archive (files absent there are skipped).
+- `total_size` is the sum of `size` over all matched files — known *before* the
   export.
 - `output_path` is the relative path the file will be written to under `--to`.
 - `offsets` are the `file_offset`s of every match in that file.
 - `export --from-manifest` reuses `output_path` and locates each file by
   `internal_path`; missing entries are reported as skipped.
+
+## Export report (`export-report.json`)
+
+Every export (`search --export DIR` or the `export` subcommand) writes
+`DIR/export-report.json`: the `run` metadata plus one entry per written file —
+its `internal_path`, `output_path` (relative to `DIR`), `size`, and `sha256`.
+This records the integrity hash of each exported artefact (main files and
+SQLite sidecars alike) beside the artefacts themselves.
+
+```json
+{
+  "run": { "tool": "mf-zipgrep", "...": "..." },
+  "file_count": 2,
+  "files": [
+    {
+      "internal_path": "private/var/.../sms.db",
+      "output_path": "sms.db_a3f2c1d0e5/sms.db",
+      "size": 5242880,
+      "sha256": "2b8e1f9b…"
+    }
+  ]
+}
+```
