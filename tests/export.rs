@@ -13,7 +13,26 @@ use common::{FileSpec, build_zip};
 use mf_zipgrep::engine::search_archive;
 use mf_zipgrep::export::{self, ExportOutcome};
 use mf_zipgrep::filter::EntryFilter;
+use mf_zipgrep::models::RunInfo;
 use regex::bytes::Regex;
+
+/// Minimal run metadata for manifest tests.
+fn run_info() -> RunInfo {
+    RunInfo {
+        tool: "mf-zipgrep".into(),
+        version: "test".into(),
+        pattern: "TARGET".into(),
+        literal: false,
+        ignore_case: false,
+        match_path: false,
+        inspect: false,
+        archives: vec!["test.zip".into()],
+        path_globs: vec![],
+        not_path_globs: vec![],
+        types: vec![],
+        exclude_media: false,
+    }
+}
 
 /// Build a two-file archive (same basename, different dirs) and search it.
 fn findings_two_infoplists() -> (Vec<u8>, mf_zipgrep::engine::Findings) {
@@ -67,7 +86,7 @@ fn manifest_lists_files_with_total_size() {
     let plan = export::plan(&findings.files);
 
     let mut buf = Vec::new();
-    export::write_manifest(&plan, &mut buf).unwrap();
+    export::write_manifest(&plan, &run_info(), &mut buf).unwrap();
     let json: serde_json::Value = serde_json::from_slice(&buf).unwrap();
 
     assert_eq!(json["file_count"], 2);
@@ -162,7 +181,7 @@ fn export_from_manifest_round_trips() {
 
     // Write the manifest, then read it back and export from it.
     let mut buf = Vec::new();
-    export::write_manifest(&plan, &mut buf).unwrap();
+    export::write_manifest(&plan, &run_info(), &mut buf).unwrap();
     let manifest = export::read_manifest(&buf[..]).unwrap();
 
     let dir = tempfile::tempdir().unwrap();
@@ -189,6 +208,7 @@ fn export_from_manifest_round_trips() {
 fn export_from_manifest_skips_missing_entries() {
     let (zip, _findings) = findings_two_infoplists();
     let manifest = export::Manifest {
+        run: run_info(),
         total_size: 5,
         file_count: 1,
         files: vec![export::ManifestEntry {

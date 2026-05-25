@@ -5,14 +5,33 @@
 //! tested in isolation from parsing/searching.
 //! Uses: `mf_zipgrep::{models, output}`, `serde_json` (to parse JSON back).
 
-use mf_zipgrep::models::{Inspection, MatchRecord};
+use mf_zipgrep::models::{Inspection, MatchRecord, RunInfo};
 use mf_zipgrep::output::{OutputFormat, write_counts, write_results};
 use serde_json::json;
+
+/// Minimal run metadata for output tests.
+fn run_info() -> RunInfo {
+    RunInfo {
+        tool: "mf-zipgrep".into(),
+        version: "test".into(),
+        pattern: "SECRET".into(),
+        literal: false,
+        ignore_case: false,
+        match_path: false,
+        inspect: false,
+        archives: vec!["case.zip".into()],
+        path_globs: vec![],
+        not_path_globs: vec![],
+        types: vec![],
+        exclude_media: false,
+    }
+}
 
 /// A match whose surrounding bytes are binary (contain a NUL).
 fn binary_record() -> Vec<MatchRecord> {
     vec![MatchRecord {
         archive: None,
+        archive_path: None,
         path: "db.sqlite".into(),
         file_start: 0,
         file_offset: 4096, // 0x1000
@@ -28,6 +47,7 @@ fn sample() -> Vec<MatchRecord> {
     vec![
         MatchRecord {
             archive: None,
+        archive_path: None,
             path: "sub/b.log".into(),
             file_start: 100,
             file_offset: 17,
@@ -39,6 +59,7 @@ fn sample() -> Vec<MatchRecord> {
         },
         MatchRecord {
             archive: None,
+        archive_path: None,
             path: "a.txt".into(),
             file_start: 200,
             file_offset: 12,
@@ -53,7 +74,7 @@ fn sample() -> Vec<MatchRecord> {
 
 fn render(records: &[MatchRecord], format: OutputFormat, colourise: bool) -> String {
     let mut buf = Vec::new();
-    write_results(records, format, colourise, false, &mut buf).unwrap();
+    write_results(records, format, colourise, false, &run_info(), &mut buf).unwrap();
     String::from_utf8(buf).unwrap()
 }
 
@@ -78,15 +99,21 @@ fn txt_colourises_only_the_match() {
 }
 
 #[test]
-fn json_round_trips_all_fields() {
+fn json_wraps_run_metadata_and_results_with_hex_offsets() {
     let out = render(&sample(), OutputFormat::Json, false);
 
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let first = &parsed[0];
+    // Run metadata heads the report.
+    assert_eq!(parsed["run"]["tool"], "mf-zipgrep");
+    assert_eq!(parsed["run"]["pattern"], "SECRET");
+    assert_eq!(parsed["run"]["archives"][0], "case.zip");
+
+    let first = &parsed["results"][0];
     assert_eq!(first["path"], "sub/b.log");
-    assert_eq!(first["file_start"], 100);
-    assert_eq!(first["file_offset"], 17);
-    assert_eq!(first["archive_offset"], 117);
+    // Offsets are 0x… hex strings (100, 17, 117).
+    assert_eq!(first["file_start"], "0x64");
+    assert_eq!(first["file_offset"], "0x11");
+    assert_eq!(first["archive_offset"], "0x75");
     assert_eq!(first["compressed"], false);
     assert_eq!(first["line"], "another SECRET line");
 }
@@ -100,10 +127,11 @@ fn csv_has_header_and_rows() {
         lines.next().unwrap(),
         "archive,path,file_start,file_offset,archive_offset,compressed,format,context,line"
     );
-    // Single archive => empty archive column; format/context empty without inspect.
+    // Single archive => empty archive column; format/context empty without
+    // inspect; offsets are 0x… hex (100, 17, 117).
     assert_eq!(
         lines.next().unwrap(),
-        ",sub/b.log,100,17,117,false,,,another SECRET line"
+        ",sub/b.log,0x64,0x11,0x75,false,,,another SECRET line"
     );
 }
 
@@ -111,6 +139,7 @@ fn csv_has_header_and_rows() {
 fn txt_shows_hex_file_offset_for_compressed() {
     let records = vec![MatchRecord {
         archive: None,
+        archive_path: None,
         path: "c.bin".into(),
         file_start: 50,
         file_offset: 10,
@@ -131,6 +160,7 @@ fn txt_shows_hex_file_offset_for_compressed() {
 fn inspected() -> Vec<MatchRecord> {
     vec![MatchRecord {
         archive: None,
+        archive_path: None,
         path: "a.txt".into(),
         file_start: 0,
         file_offset: 12,
@@ -161,7 +191,7 @@ fn json_nests_inspection_context() {
     let out = render(&inspected(), OutputFormat::Json, false);
 
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    let first = &parsed[0];
+    let first = &parsed["results"][0];
     assert_eq!(first["format"], "txt");
     assert_eq!(first["context"]["line"], 2);
     assert_eq!(first["context"]["col"], 5);
@@ -187,8 +217,9 @@ fn txt_suppresses_binary_line() {
 fn json_omits_line_for_binary() {
     let out = render(&binary_record(), OutputFormat::Json, false);
     let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert!(parsed[0].get("line").is_none()); // no binary content
-    assert_eq!(parsed[0]["file_offset"], 4096); // location still reported
+    let first = &parsed["results"][0];
+    assert!(first.get("line").is_none()); // no binary content
+    assert_eq!(first["file_offset"], "0x1000"); // location still reported (hex 4096)
 }
 
 #[test]
@@ -211,10 +242,11 @@ fn count_writes_one_line_per_file() {
 fn tags_source_archive_when_set() {
     let mut recs = sample();
     for r in &mut recs {
-        r.archive = Some("case.zip".into());
+        r.archive = Some("case.zip".into()); // display label (txt/csv)
+        r.archive_path = Some("/cases/case.zip".into()); // full path (json)
     }
 
-    // txt joins the archive to the path like a folder.
+    // txt joins the archive label to the path like a folder.
     let txt = render(&recs, OutputFormat::Txt, false);
     assert!(
         txt.lines()
@@ -223,10 +255,10 @@ fn tags_source_archive_when_set() {
             .starts_with("case.zip/sub/b.log:0x11:")
     );
 
-    // json gains an `archive` field.
+    // json carries the archive's full path per result.
     let json = render(&recs, OutputFormat::Json, false);
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(parsed[0]["archive"], "case.zip");
+    assert_eq!(parsed["results"][0]["archive"], "/cases/case.zip");
 
     // csv populates the leading archive column.
     let csv = render(&recs, OutputFormat::Csv, false);
