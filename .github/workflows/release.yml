@@ -1,7 +1,9 @@
 name: Release
 
 # Build the binary for every supported target on tag push, then publish a
-# GitHub release with the renamed binaries plus a SHA256SUMS manifest.
+# GitHub release with one archive per platform (tar.gz for Unix, zip for
+# Windows) — each containing the binary (simple name) + README + LICENSE —
+# plus a SHA256SUMS manifest covering those archives.
 #
 # Actions are pinned to commit SHAs (not moving tags) so a compromised upstream
 # tag cannot silently alter the release pipeline of a forensic tool. The version
@@ -50,26 +52,33 @@ jobs:
       # Don't cancel sibling targets when one fails — surface every failure.
       fail-fast: false
       matrix:
+        # bin_name   = the executable's filename inside the archive (kept simple)
+        # asset_stem = the archive's base name (carries the platform)
+        # archive    = tar.gz (Unix, preserves the +x bit) or zip (Windows)
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact_name: mf-zipgrep
-            asset_name: mf-zipgrep-linux-x86_64
+            bin_name: mf-zipgrep
+            asset_stem: mf-zipgrep-linux-x86_64
+            archive: tar.gz
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact_name: mf-zipgrep.exe
-            asset_name: mf-zipgrep-windows-x86_64.exe
+            bin_name: mf-zipgrep.exe
+            asset_stem: mf-zipgrep-windows-x86_64
+            archive: zip
 
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact_name: mf-zipgrep
-            asset_name: mf-zipgrep-macos-x86_64
+            bin_name: mf-zipgrep
+            asset_stem: mf-zipgrep-macos-x86_64
+            archive: tar.gz
 
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact_name: mf-zipgrep
-            asset_name: mf-zipgrep-macos-aarch64
+            bin_name: mf-zipgrep
+            asset_stem: mf-zipgrep-macos-aarch64
+            archive: tar.gz
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -86,21 +95,34 @@ jobs:
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      # Rename to the unique asset_name so the four binaries don't collide in
-      # the release (three would otherwise upload as plain "mf-zipgrep").
-      # shell: bash so this one step also runs on the Windows runner.
-      - name: Stage binary under its asset name
+      # Stage the binary (under its simple name) with the docs in a folder named
+      # after the platform, so extraction yields a clean, self-describing dir.
+      # shell: bash so this runs identically on the Windows runner.
+      - name: Stage archive contents
         shell: bash
         run: |
-          mkdir dist
-          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" \
-             "dist/${{ matrix.asset_name }}"
+          mkdir "${{ matrix.asset_stem }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "${{ matrix.asset_stem }}/"
+          cp README.md LICENSE "${{ matrix.asset_stem }}/"
+
+      # Unix: tar.gz preserves the executable bit. COPYFILE_DISABLE stops macOS
+      # tar from injecting AppleDouble (._*) metadata files into the archive.
+      - name: Archive (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: COPYFILE_DISABLE=1 tar -czf "${{ matrix.asset_stem }}.tar.gz" "${{ matrix.asset_stem }}"
+
+      # Windows: Compress-Archive is built into PowerShell (no `zip` in Git Bash).
+      - name: Archive (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: Compress-Archive -Path "${{ matrix.asset_stem }}" -DestinationPath "${{ matrix.asset_stem }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: dist/${{ matrix.asset_name }}
+          name: ${{ matrix.asset_stem }}.${{ matrix.archive }}
+          path: ${{ matrix.asset_stem }}.${{ matrix.archive }}
           retention-days: 1
 
   release:
@@ -116,9 +138,9 @@ jobs:
         with:
           path: artifacts
 
-      # Flatten the per-artifact folders into one dir and hash everything, so
-      # downloaders can verify binary integrity (important for a forensic tool).
-      - name: Collect binaries and compute checksums
+      # Flatten the per-artifact folders into one dir and hash every archive, so
+      # downloaders can verify integrity (important for a forensic tool).
+      - name: Collect archives and compute checksums
         run: |
           mkdir dist
           find artifacts -type f -exec cp {} dist/ \;
@@ -130,5 +152,8 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
+          # Auto-build the release body from merged PRs/commits since the
+          # previous tag (no manual changelog to maintain).
+          generate_release_notes: true
           # Tags carrying a pre-release suffix (e.g. v0.1.0-rc1) are flagged.
           prerelease: ${{ contains(github.ref_name, '-') }}

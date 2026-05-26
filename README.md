@@ -223,6 +223,13 @@ for a future version (ABX, SEGB).
 
 ---
 
+## Development & AI use
+
+Generative AI was used in this project mainly to assist during the coding phase.
+The original ideas and the overall structure are the owner's, and all core logic
+has been reviewed. Even so, mistakes or bugs may have slipped past proof-reading —
+please report anything unexpected.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
